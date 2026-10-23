@@ -470,6 +470,9 @@ export default function InterviewPage() {
   const [evaluationReady, setEvaluationReady] = useState(false);
   const [isNextQuestionLoading, setIsNextQuestionLoading] = useState(false);
   const [questionNumber, setQuestionNumber] = useState(0);
+  const [nextQuestionCountdown, setNextQuestionCountdown] = useState(null);
+  const [isEvaluating, setIsEvaluating] = useState(false);
+  const [hasAnswerStarted, setHasAnswerStarted] = useState(false);
   const [permissions, setPermissions] = useState({
     camera: "pending",
     microphone: "pending",
@@ -495,11 +498,6 @@ export default function InterviewPage() {
   const interviewStarted = useRef(false);
   const mediaStreamRef = useRef(null);
   const videoRef = useRef(null);
-  useEffect(() => {
-    conversationEndRef.current?.scrollIntoView({
-      behavior: "smooth",
-    });
-  }, [conversation]);
 
   const stopMedia = useCallback(() => {
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
@@ -748,7 +746,7 @@ export default function InterviewPage() {
    * Countdown timer
    */
   useEffect(() => {
-    if (status !== "question" && status !== "ready") return;
+    if (status !== "question" && status !== "listening") return;
 
     timerRef.current = setInterval(() => {
       setRemainingTime((prev) => {
@@ -1001,9 +999,9 @@ export default function InterviewPage() {
                   />
                 </GlassCard>
 
-                {/* Conversation Log (compact) */}
+                {/* Conversation Log */}
                 {conversation.length > 0 && (
-                  <div className="max-h-[500px] overflow-y-auto space-y-3 rounded-xl bg-white/5 p-4">
+                  <div className="space-y-3 rounded-xl bg-white/5 p-4">
                     <p className="text-xs font-semibold uppercase tracking-widest text-white/40">
                       Interview Activity
                     </p>
