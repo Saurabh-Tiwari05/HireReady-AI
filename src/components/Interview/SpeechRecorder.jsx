@@ -1,9 +1,14 @@
 // SpeechRecorder Component - main speech recognition interface
-import React, { useRef, useEffect, useState } from "react";
+
+import { useRef, useEffect, useState } from "react";
+
 import useSpeechRecognition from "../../hooks/useSpeechRecognition";
 import TranscriptBox from "./TranscriptBox";
 import MicStatus from "./MicStatus";
 import SpeechService from "../../services/speech.service";
+
+const SILENCE_LIMIT_MS = 7000;
+const FINAL_RESULT_SETTLE_MS = 1200;
 
 const SpeechRecorder = ({
   interviewId,
@@ -12,75 +17,90 @@ const SpeechRecorder = ({
   onStatusChange,
   isQuestionActive,
 }) => {
-  const autoSaveRef = useRef(null);
-  const stopTimeoutRef = useRef(null);
+  // ==================================================
+  // REFS
+  // ==================================================
 
-  // Prevent duplicate answer submissions
+  const autoSaveRef = useRef(null);
+
   const submittedRef = useRef(false);
 
-  // Always keeps the latest transcript available
-  // even before React state finishes updating.
+  const finalizingRef = useRef(false);
+
   const latestTranscriptRef = useRef("");
 
-  // --------------------------------------------------
-  // Silence monitoring
-  // --------------------------------------------------
-
-  // Timestamp of the most recent actual speech/transcript activity.
   const lastSpeechAtRef = useRef(null);
 
-  // Interview-level silence monitor.
   const silenceMonitorRef = useRef(null);
 
-  // UI countdown.
-  const silenceTimerRef = useRef(null);
-
-  // Used when waiting for late browser recognition results
-  // after stop() has been called.
   const finalizationTimeoutRef = useRef(null);
 
-  // Auto-submit after 7 seconds of genuine silence.
-  const SILENCE_LIMIT_MS = 7000;
+  const previousQuestionIdRef = useRef(questionId);
 
-  /*
-   * IMPORTANT:
-   *
-   * SpeechRecognition can sometimes deliver its final
-   * result slightly AFTER stop() is called.
-   *
-   * Give the browser a short settling period before
-   * reading the final transcript.
-   */
-  const FINAL_RESULT_SETTLE_MS = 1200;
+  // Tracks the question associated with an API submission.
+  const activeSubmissionQuestionRef = useRef(null);
 
-  // API processing state
+  // Tracks whether the component is still mounted.
+  const mountedRef = useRef(true);
+
+  // Prevent stale asynchronous work from affecting
+  // a newly generated question.
+  const questionGenerationRef = useRef(0);
+
+  // Keep the latest parent callback available.
+  const onStatusChangeRef = useRef(onStatusChange);
+
+  onStatusChangeRef.current = onStatusChange;
+
+  // ==================================================
+  // STATE
+  // ==================================================
+
   const [isProcessing, setIsProcessing] = useState(false);
 
-  // Silence countdown state
   const [silenceSeconds, setSilenceSeconds] = useState(null);
 
-  // --------------------------------------------------
-  // Speech recognition configuration
-  // --------------------------------------------------
+  const [submissionError, setSubmissionError] = useState(null);
 
-  const speechParams = {
-    continuous: true,
-    interimResults: true,
-    language: "en-US",
+  const [hasSubmitted, setHasSubmitted] = useState(false);
 
-    autoSaveInterval: 3000,
+  const [isFinalizing, setIsFinalizing] = useState(false);
 
-    /*
-     * IMPORTANT:
-     *
-     * SpeechRecorder owns interview-level silence
-     * detection.
-     *
-     * The speech hook should NOT stop recognition
-     * because of silence.
-     */
-    maxSilenceTimeout: 0,
+  const [retryTranscript, setRetryTranscript] = useState("");
+
+  const [retryAlternatives, setRetryAlternatives] = useState([]);
+
+  // ==================================================
+  // HELPERS
+  // ==================================================
+
+  const notifyParent = (data) => {
+    onStatusChangeRef.current?.(data);
   };
+
+  const stopSilenceMonitoring = () => {
+    clearInterval(silenceMonitorRef.current);
+
+    silenceMonitorRef.current = null;
+
+    setSilenceSeconds(null);
+  };
+
+  const clearAutoSave = () => {
+    clearTimeout(autoSaveRef.current);
+
+    autoSaveRef.current = null;
+  };
+
+  const clearFinalizationTimeout = () => {
+    clearTimeout(finalizationTimeoutRef.current);
+
+    finalizationTimeoutRef.current = null;
+  };
+
+  // ==================================================
+  // SPEECH RECOGNITION
+  // ==================================================
 
   const {
     isSupported,
@@ -100,52 +120,47 @@ const SpeechRecorder = ({
     getLatestTranscript,
     getLatestAlternatives,
   } = useSpeechRecognition({
-    ...speechParams,
+    continuous: true,
 
-    // --------------------------------------------------
-    // Live transcript
-    // --------------------------------------------------
+    interimResults: true,
+
+    language: "en-US",
+
+    autoSaveInterval: 3000,
+
+    // Silence detection is handled by this component.
+    maxSilenceTimeout: 0,
+
+    // ----------------------------------------------
+    // LIVE TRANSCRIPT
+    // ----------------------------------------------
 
     onTranscriptUpdate: (fullTranscript) => {
+      if (finalizingRef.current || submittedRef.current) {
+        return;
+      }
+
       const latest = fullTranscript || "";
 
-      /*
-       * Keep the latest transcript outside React state.
-       */
+      const previousTranscript = latestTranscriptRef.current;
+
       latestTranscriptRef.current = latest;
 
-      /*
-       * Any transcript activity means the candidate
-       * is still answering.
-       */
-      if (latest.trim()) {
+      if (latest.trim() && latest !== previousTranscript) {
         lastSpeechAtRef.current = Date.now();
       }
 
-      // Candidate is active again.
       setSilenceSeconds(null);
 
-      if (onStatusChange) {
-        onStatusChange({
-          type: "transcript",
-          transcript: latest,
-        });
-      }
+      notifyParent({
+        type: "transcript",
+        transcript: latest,
+      });
     },
 
-    // --------------------------------------------------
-    // Speech recognition status
-    // --------------------------------------------------
-    //
-    // useSpeechRecognition now sends:
-    //
-    // { type: "speechstart" }
-    //
-    // whenever the browser detects actual speech.
-    //
-    // This is important because a speechstart can happen
-    // before the final transcript arrives.
-    // --------------------------------------------------
+    // ----------------------------------------------
+    // RECOGNITION STATUS
+    // ----------------------------------------------
 
     onStatusChange: (status) => {
       if (!status) {
@@ -153,67 +168,99 @@ const SpeechRecorder = ({
       }
 
       if (status.type === "speechstart") {
-        console.log(
-          "[SPEECH] Actual speech detected. Resetting silence clock.",
-        );
+        if (!finalizingRef.current && !submittedRef.current) {
+          lastSpeechAtRef.current = Date.now();
 
+          setSilenceSeconds(null);
+        }
+      }
+
+      notifyParent(status);
+    },
+
+    // ----------------------------------------------
+    // FINAL TRANSCRIPT SEGMENT
+    // ----------------------------------------------
+
+    onFinalTranscript: (finalTranscript) => {
+      if (!finalizingRef.current && !submittedRef.current) {
         lastSpeechAtRef.current = Date.now();
 
         setSilenceSeconds(null);
       }
 
-      /*
-       * Forward the status to the parent component too.
-       */
-      if (onStatusChange) {
-        onStatusChange(status);
-      }
+      notifyParent({
+        type: "final_transcript",
+        transcript: finalTranscript,
+      });
     },
 
-    // --------------------------------------------------
-    // Final speech segment
-    //
-    // Do NOT submit here.
-    // --------------------------------------------------
-
-    onFinalTranscript: (finalTranscript) => {
-      console.log("[SPEECH] Final speech segment received:", finalTranscript);
-
-      /*
-       * A final result is definite evidence that the
-       * candidate is still answering.
-       */
-      lastSpeechAtRef.current = Date.now();
-
-      setSilenceSeconds(null);
-
-      if (onStatusChange) {
-        onStatusChange({
-          type: "final_transcript",
-          transcript: finalTranscript,
-        });
-      }
-    },
-
-    // --------------------------------------------------
-    // Recognition error
-    // --------------------------------------------------
+    // ----------------------------------------------
+    // RECOGNITION ERROR
+    // ----------------------------------------------
 
     onError: (err) => {
       console.error("[SPEECH] Recognition error:", err);
 
-      if (onStatusChange) {
-        onStatusChange({
-          type: "error",
-          error: err,
-        });
-      }
+      notifyParent({
+        type: "error",
+        error: err,
+      });
     },
   });
 
-  // --------------------------------------------------
-  // Helper: wait for late browser final results
-  // --------------------------------------------------
+  // ==================================================
+  // QUESTION CHANGE RESET
+  // ==================================================
+
+  useEffect(() => {
+    if (previousQuestionIdRef.current === questionId) {
+      return;
+    }
+
+    console.log("[SPEECH] New question detected:", questionId);
+
+    previousQuestionIdRef.current = questionId;
+
+    // Invalidate any pending finalization.
+    questionGenerationRef.current += 1;
+
+    submittedRef.current = false;
+
+    finalizingRef.current = false;
+
+    activeSubmissionQuestionRef.current = null;
+
+    latestTranscriptRef.current = "";
+
+    lastSpeechAtRef.current = null;
+
+    stopSilenceMonitoring();
+
+    clearAutoSave();
+
+    clearFinalizationTimeout();
+
+    setIsProcessing(false);
+
+    setIsFinalizing(false);
+
+    setHasSubmitted(false);
+
+    setSubmissionError(null);
+
+    setRetryTranscript("");
+
+    setRetryAlternatives([]);
+
+    stop();
+
+    clear();
+  }, [questionId, stop, clear]);
+
+  // ==================================================
+  // WAIT FOR FINAL BROWSER RECOGNITION RESULT
+  // ==================================================
 
   const waitForFinalRecognitionResult = () => {
     return new Promise((resolve) => {
@@ -221,338 +268,387 @@ const SpeechRecorder = ({
 
       finalizationTimeoutRef.current = setTimeout(() => {
         finalizationTimeoutRef.current = null;
+
         resolve();
       }, FINAL_RESULT_SETTLE_MS);
     });
   };
 
-  // --------------------------------------------------
-  // Submit completed answer
-  // --------------------------------------------------
+  // ==================================================
+  // SUBMIT ANSWER
+  // ==================================================
 
   const submitAnswer = async (finalTranscript, { alternatives = [] } = {}) => {
-    if (!finalTranscript?.trim()) {
-      console.warn("[SPEECH] Cannot submit empty answer.");
+    const cleanedTranscript = finalTranscript?.trim() || "";
 
-      setIsProcessing(false);
+    if (!cleanedTranscript) {
+      console.warn("[SPEECH] Empty answer cannot be submitted.");
+
       return;
     }
 
     if (!interviewId || !contextId || !questionId) {
-      console.error("[SPEECH] Missing interview IDs:", {
-        interviewId,
-        contextId,
-        questionId,
-      });
+      console.error("[SPEECH] Missing interview identifiers.");
 
-      setIsProcessing(false);
+      setSubmissionError(
+        "Interview information is missing. Unable to submit answer.",
+      );
+
       return;
     }
 
-    // Prevent duplicate submissions
     if (submittedRef.current) {
-      console.warn("[SPEECH] Answer already submitted.");
+      console.warn("[SPEECH] Duplicate submission prevented.");
+
       return;
     }
+
+    const submissionQuestionId = questionId;
+
+    const submissionGeneration = questionGenerationRef.current;
 
     submittedRef.current = true;
+
+    activeSubmissionQuestionRef.current = submissionQuestionId;
+
     setIsProcessing(true);
-    onStatusChange?.({
+
+    setSubmissionError(null);
+
+    setRetryTranscript(cleanedTranscript);
+
+    setRetryAlternatives(alternatives);
+
+    stopSilenceMonitoring();
+
+    clearAutoSave();
+
+    notifyParent({
       type: "evaluation_start",
     });
-    // Stop silence monitoring.
-    clearInterval(silenceTimerRef.current);
-    clearInterval(silenceMonitorRef.current);
 
-    setSilenceSeconds(null);
-
-    console.log("[SPEECH] Submitting completed answer...");
-
-    console.log("[SPEECH] IDs:", {
+    console.log("[SPEECH] Submitting answer:", {
       interviewId,
       contextId,
       questionId,
+      transcript: cleanedTranscript,
     });
-
-    console.log("[SPEECH] Final authoritative transcript:", finalTranscript);
-
-    console.log("[SPEECH] Recognition alternatives:", alternatives);
 
     try {
       const endTime = Date.now();
 
       const responseDuration = Math.max(0, elapsedTime);
 
-      const calculatedStartTime = endTime - responseDuration;
+      const startTime = endTime - responseDuration;
 
       const result = await SpeechService.submitTranscript({
         interviewId,
+
         contextId,
-        questionId,
 
-        // Keep the raw browser transcript.
-        transcript: finalTranscript.trim(),
+        questionId: submissionQuestionId,
 
-        // Browser recognition alternatives.
+        transcript: cleanedTranscript,
+
         alternatives,
 
-        startTime: calculatedStartTime,
+        startTime,
+
         endTime,
 
         responseDuration,
 
-        wordCount: finalTranscript.trim().split(/\s+/).filter(Boolean).length,
+        wordCount: cleanedTranscript.split(/\s+/).filter(Boolean).length,
 
         topic: "general",
+
         difficulty: "medium",
       });
 
+      // Ignore a response belonging to an older question.
+      if (
+        !mountedRef.current ||
+        questionGenerationRef.current !== submissionGeneration
+      ) {
+        return;
+      }
+
       console.log("[SPEECH] Answer submitted successfully:", result);
 
-      const evaluation = result?.data?.evaluation || null;
+      const evaluation = result?.data?.evaluation ?? null;
 
-      if (onStatusChange) {
-        onStatusChange({
-          type: "evaluation",
-          evaluation,
-          transcript: finalTranscript.trim(),
-        });
-      }
+      setHasSubmitted(true);
+
+      setSubmissionError(null);
+
+      setRetryTranscript("");
+
+      setRetryAlternatives([]);
+
+      notifyParent({
+        type: "evaluation",
+
+        evaluation,
+
+        transcript: cleanedTranscript,
+      });
     } catch (err) {
-      console.error("[SPEECH] Error submitting answer:", err);
+      console.error("[SPEECH] Submission failed:", err);
 
-      // Allow retry if API failed.
+      if (
+        !mountedRef.current ||
+        questionGenerationRef.current !== submissionGeneration
+      ) {
+        return;
+      }
+
       submittedRef.current = false;
 
-      // Tell Interview.jsx that evaluation has stopped.
-      // This allows the interview timer to resume.
-      onStatusChange?.({
+      setHasSubmitted(false);
+
+      setSubmissionError(
+        err?.message || "Answer evaluation failed. Please try again.",
+      );
+
+      // Preserve the answer for retry.
+      latestTranscriptRef.current = cleanedTranscript;
+
+      setRetryTranscript(cleanedTranscript);
+
+      setRetryAlternatives(alternatives);
+
+      notifyParent({
         type: "evaluation_end",
       });
 
-      // Forward the original error to Interview.jsx.
-      onStatusChange?.({
+      notifyParent({
         type: "error",
+
         error: err,
       });
     } finally {
-      setIsProcessing(false);
+      if (
+        mountedRef.current &&
+        questionGenerationRef.current === submissionGeneration
+      ) {
+        setIsProcessing(false);
+      }
     }
   };
 
-  // --------------------------------------------------
-  // Manual Stop
-  // --------------------------------------------------
+  // ==================================================
+  // FINALIZE RECORDING
+  // ==================================================
 
-  const handleStop = async () => {
-    if (isProcessing) {
+  const finalizeRecording = async (reason = "manual") => {
+    if (
+      finalizingRef.current ||
+      submittedRef.current ||
+      isProcessing ||
+      !isQuestionActive
+    ) {
       return;
     }
 
-    if (submittedRef.current) {
-      return;
-    }
+    finalizingRef.current = true;
 
-    console.log("[SPEECH] Manual Stop clicked.");
+    setIsFinalizing(true);
 
-    clearInterval(silenceTimerRef.current);
-    clearInterval(silenceMonitorRef.current);
+    const currentGeneration = questionGenerationRef.current;
 
-    setSilenceSeconds(null);
+    console.log(`[SPEECH] Finalizing recording: ${reason}`);
 
-    /*
-     * IMPORTANT:
-     *
-     * Do NOT capture the final transcript and immediately
-     * submit it.
-     *
-     * Chrome may send one last final result after stop().
-     */
+    stopSilenceMonitoring();
 
-    console.log(
-      "[SPEECH] Stopping recognition and waiting for final browser result...",
-    );
+    clearAutoSave();
 
-    stop();
+    try {
+      // Stop recognition first.
+      stop();
 
-    /*
-     * Give SpeechRecognition time to deliver any final
-     * result generated immediately before stop().
-     */
-    await waitForFinalRecognitionResult();
+      // Wait for late browser final results.
+      await waitForFinalRecognitionResult();
 
-    /*
-     * NOW read the authoritative transcript.
-     *
-     * This can include a final result that arrived after
-     * stop() was called.
-     */
-    const finalAnswer = getLatestTranscript();
-    const alternatives = getLatestAlternatives();
+      // Ignore finalization from an older question.
+      if (
+        !mountedRef.current ||
+        questionGenerationRef.current !== currentGeneration
+      ) {
+        return;
+      }
 
-    latestTranscriptRef.current = finalAnswer || "";
+      const finalAnswer = getLatestTranscript();
 
-    console.log(
-      "[SPEECH] Final answer after recognition settled:",
-      finalAnswer,
-    );
+      const alternatives = getLatestAlternatives();
 
-    console.log(
-      "[SPEECH] Final alternatives after recognition settled:",
-      alternatives,
-    );
-
-    lastSpeechAtRef.current = null;
-
-    await submitAnswer(finalAnswer, {
-      alternatives,
-    });
-  };
-
-  // --------------------------------------------------
-  // Automatic silence submission
-  // --------------------------------------------------
-
-  const handleSilenceTimeout = async () => {
-    if (isProcessing || submittedRef.current || !isRecording) {
-      return;
-    }
-
-    console.log("[SPEECH] 7 seconds of actual silence reached.");
-
-    clearInterval(silenceTimerRef.current);
-    clearInterval(silenceMonitorRef.current);
-
-    setSilenceSeconds(null);
-
-    /*
-     * Stop recognition first.
-     *
-     * A final browser result may still arrive after this.
-     */
-    console.log("[SPEECH] Stopping recognition before automatic submission...");
-
-    stop();
-
-    /*
-     * IMPORTANT:
-     *
-     * Do NOT read the transcript before stop().
-     *
-     * The browser may deliver one last final result after
-     * stop() and update the hook's authoritative transcript.
-     */
-    await waitForFinalRecognitionResult();
-
-    /*
-     * Read the transcript AFTER the settling period.
-     */
-    const finalAnswer = getLatestTranscript();
-    const alternatives = getLatestAlternatives();
-
-    latestTranscriptRef.current = finalAnswer || "";
-
-    /*
-     * Never submit an empty answer.
-     */
-    if (!finalAnswer?.trim()) {
-      console.warn("[SPEECH] Silence reached but no answer exists.");
+      latestTranscriptRef.current = finalAnswer || "";
 
       lastSpeechAtRef.current = null;
 
-      return;
+      console.log("[SPEECH] Final transcript:", finalAnswer);
+
+      if (!finalAnswer?.trim()) {
+        console.warn("[SPEECH] No answer detected.");
+
+        setSubmissionError(
+          "No speech was detected. Please record your answer again.",
+        );
+
+        return;
+      }
+
+      await submitAnswer(finalAnswer, {
+        alternatives,
+      });
+    } catch (err) {
+      console.error("[SPEECH] Finalization error:", err);
+
+      if (
+        mountedRef.current &&
+        questionGenerationRef.current === currentGeneration
+      ) {
+        setSubmissionError(err?.message || "Unable to finalize recording.");
+      }
+    } finally {
+      if (
+        mountedRef.current &&
+        questionGenerationRef.current === currentGeneration
+      ) {
+        finalizingRef.current = false;
+
+        setIsFinalizing(false);
+      }
     }
-
-    console.log("[SPEECH] Auto-submit final answer:", finalAnswer);
-
-    console.log("[SPEECH] Auto-submit alternatives:", alternatives);
-
-    lastSpeechAtRef.current = null;
-
-    await submitAnswer(finalAnswer, {
-      alternatives,
-    });
   };
 
-  // --------------------------------------------------
-  // Start
-  // --------------------------------------------------
+  // ==================================================
+  // MANUAL STOP
+  // ==================================================
+
+  const handleStop = () => {
+    console.log("[SPEECH] Manual stop requested.");
+
+    finalizeRecording("manual");
+  };
+
+  // ==================================================
+  // AUTOMATIC SILENCE SUBMISSION
+  // ==================================================
+
+  const handleSilenceTimeout = () => {
+    console.log("[SPEECH] Seven seconds of silence detected.");
+
+    finalizeRecording("silence");
+  };
+
+  // ==================================================
+  // START RECORDING
+  // ==================================================
 
   const handleStart = () => {
-    if (isProcessing) {
+    if (
+      isProcessing ||
+      isFinalizing ||
+      finalizingRef.current ||
+      submittedRef.current ||
+      !isQuestionActive
+    ) {
       return;
     }
 
     if (!questionId) {
-      console.warn("[SPEECH] Cannot start: question ID missing.");
+      console.warn("[SPEECH] Question ID missing.");
 
       return;
     }
 
-    console.log("[SPEECH] Starting new answer...");
+    console.log("[SPEECH] Starting answer recording.");
 
-    submittedRef.current = false;
+    setSubmissionError(null);
+
+    setRetryTranscript("");
+
+    setRetryAlternatives([]);
 
     latestTranscriptRef.current = "";
 
     lastSpeechAtRef.current = Date.now();
 
-    clearInterval(silenceTimerRef.current);
-    clearInterval(silenceMonitorRef.current);
+    stopSilenceMonitoring();
 
-    clearTimeout(finalizationTimeoutRef.current);
+    clearAutoSave();
 
-    setSilenceSeconds(null);
+    clearFinalizationTimeout();
 
     start();
   };
 
-  // --------------------------------------------------
-  // Toggle Start / Stop
-  // --------------------------------------------------
+  // ==================================================
+  // START / STOP BUTTON
+  // ==================================================
 
   const handleToggleRecording = () => {
-    if (isProcessing) {
+    if (
+      isProcessing ||
+      isFinalizing ||
+      finalizingRef.current ||
+      !isQuestionActive
+    ) {
       return;
     }
 
     if (isRecording) {
       handleStop();
+
       return;
     }
 
     handleStart();
   };
 
-  // --------------------------------------------------
-  // Interview-level silence detection
-  // --------------------------------------------------
-  //
-  // IMPORTANT:
-  //
-  // We intentionally DO NOT use `isListening`.
-  //
-  // Chrome SpeechRecognition can temporarily produce
-  // `onend` during normal recognition lifecycle events.
-  //
-  // `isListening === false` therefore does NOT mean
-  // that the candidate has stopped answering.
-  //
-  // Instead we track the last actual speech/transcript
-  // activity.
-  //
+  // ==================================================
+  // RETRY FAILED SUBMISSION
+  // ==================================================
+
+  const handleRetrySubmission = async () => {
+    if (
+      !isQuestionActive ||
+      isProcessing ||
+      isFinalizing ||
+      submittedRef.current ||
+      !retryTranscript.trim()
+    ) {
+      return;
+    }
+
+    console.log("[SPEECH] Retrying previous answer submission.");
+
+    await submitAnswer(retryTranscript, {
+      alternatives: retryAlternatives,
+    });
+  };
+
+  // ==================================================
+  // SEVEN-SECOND SILENCE MONITOR
+  // ==================================================
 
   useEffect(() => {
-    if (!isRecording || isPaused || isProcessing) {
+    if (
+      !isRecording ||
+      isPaused ||
+      isProcessing ||
+      isFinalizing ||
+      !isQuestionActive
+    ) {
       clearInterval(silenceMonitorRef.current);
-      clearInterval(silenceTimerRef.current);
+
+      silenceMonitorRef.current = null;
 
       setSilenceSeconds(null);
 
       return;
     }
 
-    // Make sure the silence clock has a starting point.
     if (!lastSpeechAtRef.current) {
       lastSpeechAtRef.current = Date.now();
     }
@@ -560,7 +656,13 @@ const SpeechRecorder = ({
     clearInterval(silenceMonitorRef.current);
 
     silenceMonitorRef.current = setInterval(() => {
-      if (!isRecording || isPaused || isProcessing || submittedRef.current) {
+      if (
+        !isRecording ||
+        isPaused ||
+        isProcessing ||
+        finalizingRef.current ||
+        submittedRef.current
+      ) {
         return;
       }
 
@@ -570,17 +672,9 @@ const SpeechRecorder = ({
 
       const remainingMs = SILENCE_LIMIT_MS - silenceDuration;
 
-      // ------------------------------------------------
-      // Candidate is still inside normal silence window
-      // ------------------------------------------------
-
       if (remainingMs > 0) {
         const remainingSeconds = Math.ceil(remainingMs / 1000);
 
-        /*
-         * Only show the warning during the final
-         * three seconds.
-         */
         if (remainingSeconds <= 3) {
           setSilenceSeconds(remainingSeconds);
         } else {
@@ -590,13 +684,9 @@ const SpeechRecorder = ({
         return;
       }
 
-      // ------------------------------------------------
-      // Full 7 seconds of actual silence reached
-      // ------------------------------------------------
-
       clearInterval(silenceMonitorRef.current);
 
-      console.log("[SPEECH] 7 seconds of actual silence reached.");
+      silenceMonitorRef.current = null;
 
       setSilenceSeconds(0);
 
@@ -605,12 +695,14 @@ const SpeechRecorder = ({
 
     return () => {
       clearInterval(silenceMonitorRef.current);
-    };
-  }, [isRecording, isPaused, isProcessing]);
 
-  // --------------------------------------------------
-  // Cancel visible countdown when candidate speaks
-  // --------------------------------------------------
+      silenceMonitorRef.current = null;
+    };
+  }, [isRecording, isPaused, isProcessing, isFinalizing, isQuestionActive]);
+
+  // ==================================================
+  // RESET SILENCE WARNING WHEN TRANSCRIPT CHANGES
+  // ==================================================
 
   useEffect(() => {
     if (transcript?.trim()) {
@@ -618,21 +710,9 @@ const SpeechRecorder = ({
     }
   }, [transcript]);
 
-  // --------------------------------------------------
-  // Auto-save interim transcript
-  // --------------------------------------------------
-  //
-  // IMPORTANT:
-  //
-  // Do NOT include elapsedTime here.
-  //
-  // elapsedTime changes continuously, which would cancel
-  // and restart this timeout every ~100ms.
-  //
-  // This timeout therefore acts as a debounce:
-  // after interim transcript activity stops for 3 seconds,
-  // save the latest interim transcript.
-  //
+  // ==================================================
+  // AUTO-SAVE INTERIM TRANSCRIPT
+  // ==================================================
 
   useEffect(() => {
     if (
@@ -640,9 +720,12 @@ const SpeechRecorder = ({
       error ||
       !isRecording ||
       isPaused ||
-      isProcessing
+      isProcessing ||
+      isFinalizing ||
+      !isQuestionActive
     ) {
       clearTimeout(autoSaveRef.current);
+
       return;
     }
 
@@ -653,14 +736,19 @@ const SpeechRecorder = ({
     autoSaveRef.current = setTimeout(() => {
       SpeechService.autoSaveTranscript({
         interviewId,
+
         contextId,
+
         questionId,
+
         transcript: interimTranscript,
+
         isFinal: false,
+
         startTime: saveStartTime,
-      }).catch((saveErr) =>
-        console.error("[SPEECH] Auto-save error:", saveErr),
-      );
+      }).catch((saveErr) => {
+        console.error("[SPEECH] Auto-save error:", saveErr);
+      });
     }, 3000);
 
     return () => {
@@ -674,87 +762,105 @@ const SpeechRecorder = ({
     isRecording,
     isPaused,
     isProcessing,
+    isFinalizing,
+    isQuestionActive,
     error,
   ]);
 
-  // --------------------------------------------------
-  // Stop when question becomes inactive
-  // --------------------------------------------------
+  // ==================================================
+  // STOP RECORDING WHEN QUESTION BECOMES INACTIVE
+  // ==================================================
 
   useEffect(() => {
     if (!isQuestionActive && isRecording && !isProcessing) {
-      stopTimeoutRef.current = setTimeout(() => {
-        clearInterval(silenceMonitorRef.current);
-        clearInterval(silenceTimerRef.current);
+      console.log("[SPEECH] Question inactive. Stopping microphone.");
 
-        setSilenceSeconds(null);
+      stopSilenceMonitoring();
 
-        lastSpeechAtRef.current = null;
-
-        stop();
-      }, 1000);
-    }
-
-    return () => {
-      if (stopTimeoutRef.current) {
-        clearTimeout(stopTimeoutRef.current);
-      }
-    };
-  }, [isQuestionActive, isRecording, isProcessing, stop]);
-
-  // --------------------------------------------------
-  // Cleanup
-  // --------------------------------------------------
-
-  useEffect(() => {
-    return () => {
-      clearTimeout(autoSaveRef.current);
-      clearTimeout(stopTimeoutRef.current);
-      clearTimeout(finalizationTimeoutRef.current);
-
-      clearInterval(silenceTimerRef.current);
-      clearInterval(silenceMonitorRef.current);
+      clearAutoSave();
 
       lastSpeechAtRef.current = null;
 
       stop();
-    };
-  }, [stop]);
+    }
+  }, [isQuestionActive, isRecording, isProcessing, stop]);
 
-  // --------------------------------------------------
-  // Reset
-  // --------------------------------------------------
+  // ==================================================
+  // CLEANUP
+  // ==================================================
+
+  useEffect(() => {
+    mountedRef.current = true;
+
+    return () => {
+      mountedRef.current = false;
+
+      questionGenerationRef.current += 1;
+
+      clearTimeout(autoSaveRef.current);
+
+      clearTimeout(finalizationTimeoutRef.current);
+
+      clearInterval(silenceMonitorRef.current);
+
+      lastSpeechAtRef.current = null;
+    };
+  }, []);
+
+  // ==================================================
+  // RESET CURRENT RECORDING
+  // ==================================================
 
   const handleReset = () => {
-    if (isProcessing) {
+    if (
+      isProcessing ||
+      isFinalizing ||
+      finalizingRef.current ||
+      submittedRef.current ||
+      !isQuestionActive
+    ) {
       return;
     }
 
-    console.log("[SPEECH] Resetting recording...");
+    console.log("[SPEECH] Resetting current answer.");
 
-    submittedRef.current = false;
+    // Stop silence countdown and pending timers.
+    stopSilenceMonitoring();
+    clearAutoSave();
+    clearFinalizationTimeout();
 
+    // Discard current recording without submitting.
+    clear();
+
+    // Reset local transcript tracking.
     latestTranscriptRef.current = "";
-
     lastSpeechAtRef.current = null;
 
-    clearTimeout(finalizationTimeoutRef.current);
+    // Clear errors and retry data.
+    setSubmissionError(null);
+    setRetryTranscript("");
+    setRetryAlternatives([]);
 
-    clearInterval(silenceTimerRef.current);
-    clearInterval(silenceMonitorRef.current);
-
-    setSilenceSeconds(null);
-
-    clear();
+    console.log("[SPEECH] Answer discarded. Ready to record again.");
   };
 
-  // --------------------------------------------------
+  // ==================================================
   // UI
-  // --------------------------------------------------
+  // ==================================================
+
+  const controlsLocked =
+    !isSupported ||
+    isProcessing ||
+    isFinalizing ||
+    !isQuestionActive ||
+    hasSubmitted;
 
   return (
     <div className="flex flex-col h-full space-y-5 bg-gray-900 text-white p-4 overflow-hidden">
-      {/* Mic Status */}
+      {/* ==============================================
+          MICROPHONE STATUS
+      ============================================== */}
+
       <div className="w-full max-w-md mx-auto text-center">
         <MicStatus
           isListening={isListening}
@@ -765,7 +871,10 @@ const SpeechRecorder = ({
         />
       </div>
 
-      {/* Live Transcript */}
+      {/* ==============================================
+          LIVE TRANSCRIPT
+      ============================================== */}
+
       <TranscriptBox
         transcript={transcript}
         interimTranscript={interimTranscript}
@@ -774,27 +883,48 @@ const SpeechRecorder = ({
         error={error}
       />
 
-      {/* Silence warning */}
-      {silenceSeconds !== null && isRecording && !isPaused && !isProcessing && (
-        <div className="text-center">
-          <div className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-yellow-900/70 border border-yellow-600 text-yellow-200 text-sm">
-            <span>⚠️</span>
+      {/* ==============================================
+          SILENCE WARNING
+      ============================================== */}
 
-            <span>
-              No speech detected. Auto-submit in{" "}
-              <strong>{silenceSeconds}s</strong>
-            </span>
+      {silenceSeconds !== null &&
+        isRecording &&
+        !isPaused &&
+        !isProcessing &&
+        !isFinalizing && (
+          <div className="text-center">
+            <div className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-yellow-900/70 border border-yellow-600 text-yellow-200 text-sm">
+              <span>⚠️</span>
+
+              <span>
+                No speech detected. Auto-submit in{" "}
+                <strong>{silenceSeconds}s</strong>
+              </span>
+            </div>
           </div>
+        )}
+
+      {/* ==============================================
+          SUBMISSION ERROR
+      ============================================== */}
+
+      {submissionError && (
+        <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3">
+          <p className="text-sm text-red-300">{submissionError}</p>
         </div>
       )}
 
-      {/* Controls */}
-      <div className="flex items-center justify-between bg-gray-800 rounded-lg px-4 py-3">
-        <div className="flex flex-1 space-x-4">
-          {/* Start / Stop */}
+      {/* ==============================================
+          CONTROLS
+      ============================================== */}
+
+      <div className="flex flex-wrap items-center justify-between gap-3 bg-gray-800 rounded-lg px-4 py-3">
+        <div className="flex flex-wrap items-center gap-3">
+          {/* START / STOP */}
+
           <button
             onClick={handleToggleRecording}
-            disabled={!isSupported || isProcessing}
+            disabled={controlsLocked}
             className={`px-4 py-2 text-sm font-medium rounded disabled:opacity-50 disabled:cursor-not-allowed ${
               isProcessing
                 ? "bg-gray-600"
@@ -803,38 +933,94 @@ const SpeechRecorder = ({
                   : "bg-green-700 hover:bg-green-800"
             }`}
           >
-            {isProcessing ? "Evaluating..." : isRecording ? "Stop" : "Start"}
+            {isProcessing
+              ? "Evaluating..."
+              : isFinalizing
+                ? "Finalizing..."
+                : hasSubmitted
+                  ? "Answer Submitted"
+                  : !isQuestionActive
+                    ? "Waiting for Question"
+                    : isRecording
+                      ? "Stop"
+                      : "Start"}
           </button>
 
-          {/* Pause / Resume */}
-          {isRecording && !isProcessing && (
+          {/* PAUSE / RESUME */}
+
+          {isRecording && !isProcessing && !isFinalizing && (
             <button
-              onClick={() => (isPaused ? resume() : pause())}
-              className="px-4 py-2 bg-yellow-700 text-sm font-medium rounded hover:bg-yellow-800"
+              onClick={() => {
+                if (isPaused) {
+                  lastSpeechAtRef.current = Date.now();
+
+                  resume();
+                } else {
+                  pause();
+                }
+              }}
+              disabled={!isQuestionActive}
+              className="px-4 py-2 bg-yellow-700 text-sm font-medium rounded hover:bg-yellow-800 disabled:opacity-50"
             >
               {isPaused ? "Resume" : "Pause"}
             </button>
           )}
 
-          {/* Reset */}
-          {!isRecording && !isProcessing && (
-            <button
-              onClick={handleReset}
-              disabled={!transcript}
-              className="px-4 py-2 bg-gray-600 text-sm font-medium rounded hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              Reset
-            </button>
-          )}
+          {/* RESET */}
+
+          {/* RESET */}
+
+          {!isProcessing &&
+            !isFinalizing &&
+            !hasSubmitted &&
+            isQuestionActive && (
+              <button
+                type="button"
+                onClick={handleReset}
+                className="px-4 py-2 bg-gray-600 text-sm font-medium rounded hover:bg-gray-700 transition-colors"
+              >
+                Reset
+              </button>
+            )}
+
+          {/* RETRY FAILED SUBMISSION */}
+
+          {submissionError &&
+            retryTranscript.trim() &&
+            !isProcessing &&
+            !isFinalizing &&
+            !hasSubmitted &&
+            isQuestionActive && (
+              <button
+                onClick={handleRetrySubmission}
+                className="px-4 py-2 bg-accent text-black text-sm font-semibold rounded hover:opacity-90"
+              >
+                Retry Submission
+              </button>
+            )}
         </div>
 
-        {/* Processing indicator */}
+        {/* PROCESSING INDICATOR */}
+
         {isProcessing && (
           <div className="text-sm text-yellow-300">⏳ Evaluating answer...</div>
         )}
+
+        {isFinalizing && !isProcessing && (
+          <div className="text-sm text-yellow-300">
+            ⏳ Finalizing transcript...
+          </div>
+        )}
+
+        {hasSubmitted && !isProcessing && (
+          <div className="text-sm text-green-300">✓ Answer submitted</div>
+        )}
       </div>
 
-      {/* Status / Stats */}
+      {/* ==============================================
+          STATUS / STATS
+      ============================================== */}
+
       <div className="text-xs opacity-70 flex items-center space-x-2 justify-end">
         {error && (
           <span className="text-red-300 font-medium bg-red-900 px-2 py-1 rounded">

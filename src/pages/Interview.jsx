@@ -472,12 +472,9 @@ export default function InterviewPage() {
   const [questionNumber, setQuestionNumber] = useState(0);
   const [nextQuestionCountdown, setNextQuestionCountdown] = useState(null);
   const [isEvaluating, setIsEvaluating] = useState(false);
-  const [hasAnswerStarted, setHasAnswerStarted] = useState(false);
-  const [permissions, setPermissions] = useState({
-    camera: "pending",
-    microphone: "pending",
-  });
 
+  const [isEndingInterview, setIsEndingInterview] = useState(false);
+  const [questionLoadError, setQuestionLoadError] = useState(false);
   // Interview config from query params (passed from Resume wizard)
   const sessionId = params.get("sessionId");
   const company = params.get("company") || "HireReady";
@@ -648,6 +645,7 @@ export default function InterviewPage() {
 
     try {
       setError(null);
+      setQuestionLoadError(false);
       setIsNextQuestionLoading(true);
 
       const token = localStorage.getItem("hr_token");
@@ -677,7 +675,7 @@ export default function InterviewPage() {
       setQuestionNumber((prev) => prev + 1);
 
       setIsEvaluating(false);
-      setHasAnswerStarted(false);
+      
       setEvaluationReady(false);
       setNextQuestionCountdown(null);
 
@@ -687,8 +685,10 @@ export default function InterviewPage() {
 
       if (!interviewEndedRef.current) {
         setError(err.message || "Failed to get next question");
+        setQuestionLoadError(true);
         setStatus("question");
-        setEvaluationReady(true); // Allows manual retry after failure.
+        setEvaluationReady(true);
+        setNextQuestionCountdown(null);
       }
     } finally {
       nextQuestionRequestRef.current = false;
@@ -712,6 +712,7 @@ export default function InterviewPage() {
       !evaluationReady ||
       status !== "question" ||
       isNextQuestionLoading ||
+      questionLoadError ||
       interviewEndedRef.current
     ) {
       setNextQuestionCountdown(null);
@@ -729,7 +730,7 @@ export default function InterviewPage() {
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [evaluationReady, status, isNextQuestionLoading]);
+  }, [evaluationReady, status, isNextQuestionLoading, questionLoadError]);
 
   useEffect(() => {
     if (
@@ -737,6 +738,7 @@ export default function InterviewPage() {
       evaluationReady &&
       status === "question" &&
       !isNextQuestionLoading &&
+      !questionLoadError &&
       !interviewEndedRef.current
     ) {
       handleNextQuestion();
@@ -746,17 +748,23 @@ export default function InterviewPage() {
     evaluationReady,
     status,
     isNextQuestionLoading,
+    questionLoadError,
     handleNextQuestion,
   ]);
   /**
    * End the interview and generate the final report
    */
   const handleEndInterview = useCallback(async () => {
-    // Immediately prevent any pending follow-up question
+    if (interviewEndedRef.current || !interview?.contextId) {
+      return;
+    }
+
     console.log("[INTERVIEW] handleEndInterview CALLED");
+
     interviewEndedRef.current = true;
 
     try {
+      setIsEndingInterview(true);
       setStatus("loading");
 
       // Stop timer immediately
@@ -880,7 +888,11 @@ export default function InterviewPage() {
 
         const lastIndex = updated.length - 1;
 
-        if (lastIndex >= 0 && updated[lastIndex].role === "user") {
+        if (
+          lastIndex >= 0 &&
+          updated[lastIndex].role === "user" &&
+          updated[lastIndex].questionId === messageId
+        ) {
           updated[lastIndex] = {
             ...updated[lastIndex],
             content: data.transcript,
@@ -891,6 +903,7 @@ export default function InterviewPage() {
 
         updated.push({
           role: "user",
+          questionId: messageId,
           content: data.transcript,
         });
 
@@ -953,7 +966,9 @@ export default function InterviewPage() {
             >
               <div className="h-12 w-12 animate-spin rounded-full border-2 border-accent border-t-transparent" />
               <p className="mt-4 text-white/60">
-                Starting your AI interview...
+                {isEndingInterview
+                  ? "Analyzing your performance and generating your interview report..."
+                  : "Starting your AI interview..."}
               </p>
             </motion.div>
           )}
@@ -1029,7 +1044,24 @@ export default function InterviewPage() {
                     </Button>
                   </div>
                 </div>
+                {error && (
+                  <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-4">
+                    <p className="text-sm text-red-300">{error}</p>
 
+                    {questionLoadError && (
+                      <button
+                        type="button"
+                        onClick={fetchNextQuestion}
+                        disabled={isNextQuestionLoading}
+                        className="mt-3 rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-black disabled:opacity-50"
+                      >
+                        {isNextQuestionLoading
+                          ? "Retrying..."
+                          : "Retry Question"}
+                      </button>
+                    )}
+                  </div>
+                )}
                 {/* Question */}
                 {currentQuestion ? (
                   <GlassCard className="relative p-6" glow="#00F2FF">
@@ -1094,8 +1126,14 @@ export default function InterviewPage() {
                     <p className="text-white/70">
                       Click below to get your first question.
                     </p>
-                    <Button className="mt-4" onClick={fetchNextQuestion}>
-                      Get First Question
+                    <Button
+                      className="mt-4"
+                      onClick={fetchNextQuestion}
+                      disabled={isNextQuestionLoading}
+                    >
+                      {isNextQuestionLoading
+                        ? "Generating First Question..."
+                        : "Get First Question"}
                     </Button>
                   </GlassCard>
                 )}
@@ -1108,7 +1146,11 @@ export default function InterviewPage() {
                     questionId={messageId}
                     onStatusChange={handleStatusChange}
                     isQuestionActive={
-                      status === "question" || status === "listening"
+                      (status === "question" || status === "listening") &&
+                      !evaluationReady &&
+                      !isEvaluating &&
+                      !isNextQuestionLoading &&
+                      !!messageId
                     }
                   />
                 </GlassCard>

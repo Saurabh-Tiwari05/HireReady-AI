@@ -124,7 +124,7 @@ const useSpeechRecognition = (options = {}) => {
   // ----------------------------------------------------------
 
   const recognitionRunningRef = useRef(false);
-
+  const isPausedRef = useRef(false);
   // Whether the current answer should continue recording.
   const shouldBeRecordingRef = useRef(false);
 
@@ -138,7 +138,7 @@ const useSpeechRecognition = (options = {}) => {
   // DUPLICATE FINAL RESULT PROTECTION
   // ----------------------------------------------------------
 
-  const lastFinalSegmentRef = useRef("");
+  const processedFinalIndexesRef = useRef(new Set());
 
   // ----------------------------------------------------------
   // RECOGNITION ALTERNATIVES
@@ -202,14 +202,11 @@ const useSpeechRecognition = (options = {}) => {
     }
 
     const SpeechRecognition =
-      window.SpeechRecognition ||
-      window.webkitSpeechRecognition;
+      window.SpeechRecognition || window.webkitSpeechRecognition;
 
     if (!SpeechRecognition) {
       setIsSupported(false);
-      setError(
-        "Speech Recognition is not supported in this browser."
-      );
+      setError("Speech Recognition is not supported in this browser.");
       return;
     }
 
@@ -228,15 +225,9 @@ const useSpeechRecognition = (options = {}) => {
     // --------------------------------------------------------
 
     try {
-      instance.maxAlternatives = Math.max(
-        1,
-        Math.min(maxAlternatives, 5)
-      );
+      instance.maxAlternatives = Math.max(1, Math.min(maxAlternatives, 5));
     } catch (err) {
-      console.warn(
-        "[SPEECH] maxAlternatives is not configurable:",
-        err
-      );
+      console.warn("[SPEECH] maxAlternatives is not configurable:", err);
     }
 
     recognitionRef.current = instance;
@@ -248,10 +239,8 @@ const useSpeechRecognition = (options = {}) => {
     // ========================================================
 
     instance.onstart = () => {
-      console.log(
-        "[SPEECH] Browser recognition started"
-      );
-
+      console.log("[SPEECH] Browser recognition started");
+      processedFinalIndexesRef.current.clear();
       recognitionRunningRef.current = true;
 
       setIsListening(true);
@@ -282,9 +271,7 @@ const useSpeechRecognition = (options = {}) => {
     // ========================================================
 
     instance.onend = () => {
-      console.log(
-        "[SPEECH] Browser recognition ended"
-      );
+      console.log("[SPEECH] Browser recognition ended");
 
       recognitionRunningRef.current = false;
 
@@ -300,21 +287,15 @@ const useSpeechRecognition = (options = {}) => {
       // browser recognition WITHOUT resetting the transcript.
       // ------------------------------------------------------
 
-      if (
-        shouldBeRecordingRef.current &&
-        !manuallyStoppedRef.current
-      ) {
-        console.log(
-          "[SPEECH] Recognition ended unexpectedly. Restarting..."
-        );
+      if (shouldBeRecordingRef.current && !manuallyStoppedRef.current) {
+        console.log("[SPEECH] Recognition ended unexpectedly. Restarting...");
 
         callbacksRef.current.onStatusChange?.({
           type: "recognitionend",
           restarting: true,
         });
 
-        const sessionId =
-          recordingSessionRef.current;
+        const sessionId = recordingSessionRef.current;
 
         clearTimeout(restartTimeoutRef.current);
 
@@ -323,13 +304,8 @@ const useSpeechRecognition = (options = {}) => {
           // Ignore stale restart timer.
           // --------------------------------------------------
 
-          if (
-            sessionId !==
-            recordingSessionRef.current
-          ) {
-            console.log(
-              "[SPEECH] Ignoring stale restart timer."
-            );
+          if (sessionId !== recordingSessionRef.current) {
+            console.log("[SPEECH] Ignoring stale restart timer.");
 
             return;
           }
@@ -348,16 +324,11 @@ const useSpeechRecognition = (options = {}) => {
           }
 
           try {
-            console.log(
-              "[SPEECH] Restarting recognition..."
-            );
+            console.log("[SPEECH] Restarting recognition...");
 
             recognitionRef.current.start();
           } catch (err) {
-            console.warn(
-              "[SPEECH] Recognition restart failed:",
-              err
-            );
+            console.warn("[SPEECH] Recognition restart failed:", err);
           }
         }, 150);
 
@@ -368,6 +339,18 @@ const useSpeechRecognition = (options = {}) => {
       // GENUINE STOP
       // ------------------------------------------------------
 
+      // GENUINE STOP OR PAUSE
+
+      if (isPausedRef.current) {
+        setIsListening(false);
+
+        // Keep the answer session active.
+        setIsRecording(true);
+        setIsPaused(true);
+
+        return;
+      }
+
       setIsRecording(false);
       setIsPaused(false);
 
@@ -376,9 +359,7 @@ const useSpeechRecognition = (options = {}) => {
       setEndTime(now);
 
       if (startTimeRef.current) {
-        setElapsedTime(
-          now - startTimeRef.current
-        );
+        setElapsedTime(now - startTimeRef.current);
       }
 
       callbacksRef.current.onStatusChange?.({
@@ -394,14 +375,10 @@ const useSpeechRecognition = (options = {}) => {
     // ========================================================
 
     instance.onspeechstart = () => {
-      console.log(
-        "[SPEECH] Speech started"
-      );
+      console.log("[SPEECH] Speech started");
 
       // No interview-level silence timer here.
-      clearTimeout(
-        silenceTimeoutRef.current
-      );
+      clearTimeout(silenceTimeoutRef.current);
 
       // ------------------------------------------------------
       // Tell SpeechRecorder that actual candidate speech has
@@ -421,13 +398,9 @@ const useSpeechRecognition = (options = {}) => {
     // ========================================================
 
     instance.onspeechend = () => {
-      console.log(
-        "[SPEECH] Speech ended."
-      );
+      console.log("[SPEECH] Speech ended.");
 
-      clearTimeout(
-        silenceTimeoutRef.current
-      );
+      clearTimeout(silenceTimeoutRef.current);
 
       // ------------------------------------------------------
       // VERY IMPORTANT:
@@ -441,9 +414,7 @@ const useSpeechRecognition = (options = {}) => {
       // 7-second silence detection.
       // ------------------------------------------------------
 
-      console.log(
-        "[SPEECH] Speech ended. Waiting for more speech..."
-      );
+      console.log("[SPEECH] Speech ended. Waiting for more speech...");
 
       callbacksRef.current.onStatusChange?.({
         type: "speechend",
@@ -457,19 +428,14 @@ const useSpeechRecognition = (options = {}) => {
     instance.onresult = (event) => {
       let currentInterim = "";
 
-      for (
-        let i = event.resultIndex;
-        i < event.results.length;
-        i++
-      ) {
+      for (let i = event.resultIndex; i < event.results.length; i++) {
         const result = event.results[i];
 
         if (!result || !result[0]) {
           continue;
         }
 
-        const primaryText =
-          result[0].transcript?.trim();
+        const primaryText = result[0].transcript?.trim();
 
         if (!primaryText) {
           continue;
@@ -481,19 +447,14 @@ const useSpeechRecognition = (options = {}) => {
 
         const alternatives = [];
 
-        for (
-          let j = 0;
-          j < result.length;
-          j++
-        ) {
+        for (let j = 0; j < result.length; j++) {
           const alternative = result[j];
 
           if (!alternative) {
             continue;
           }
 
-          const alternativeText =
-            alternative.transcript?.trim();
+          const alternativeText = alternative.transcript?.trim();
 
           if (!alternativeText) {
             continue;
@@ -501,13 +462,11 @@ const useSpeechRecognition = (options = {}) => {
 
           alternatives.push({
             text: alternativeText,
-            confidence:
-              alternative.confidence || 0,
+            confidence: alternative.confidence || 0,
           });
         }
 
-        alternativesRef.current =
-          alternatives;
+        alternativesRef.current = alternatives;
 
         // ====================================================
         // FINAL RESULT
@@ -520,34 +479,21 @@ const useSpeechRecognition = (options = {}) => {
           // Duplicate protection
           // --------------------------------------------------
 
-          if (
-            text.toLowerCase() ===
-            lastFinalSegmentRef.current.toLowerCase()
-          ) {
-            console.warn(
-              "[SPEECH] Ignoring duplicate final segment:",
-              text
-            );
-
+          if (processedFinalIndexesRef.current.has(i)) {
             continue;
           }
 
-          lastFinalSegmentRef.current =
-            text;
+          processedFinalIndexesRef.current.add(i);
 
           // --------------------------------------------------
           // Append to authoritative transcript
           // --------------------------------------------------
 
-          const previous =
-            finalTranscriptRef.current.trim();
+          const previous = finalTranscriptRef.current.trim();
 
-          const updated = previous
-            ? `${previous} ${text}`
-            : text;
+          const updated = previous ? `${previous} ${text}` : text;
 
-          finalTranscriptRef.current =
-            updated;
+          finalTranscriptRef.current = updated;
 
           setTranscript(updated);
 
@@ -555,8 +501,7 @@ const useSpeechRecognition = (options = {}) => {
           // Clear interim
           // --------------------------------------------------
 
-          interimTranscriptRef.current =
-            "";
+          interimTranscriptRef.current = "";
 
           setInterimTranscript("");
 
@@ -564,72 +509,51 @@ const useSpeechRecognition = (options = {}) => {
           // WORD COUNT
           // --------------------------------------------------
 
-          const newWords = text
-            .split(/\s+/)
-            .filter(Boolean);
+          const newWords = text.split(/\s+/).filter(Boolean);
 
-          wordCountRef.current +=
-            newWords.length;
+          wordCountRef.current += newWords.length;
 
-          setWordCount(
-            wordCountRef.current
-          );
+          setWordCount(wordCountRef.current);
 
           // --------------------------------------------------
           // CONFIDENCE
           // --------------------------------------------------
 
-          const resultConfidence =
-            result[0].confidence || 0;
+          const resultConfidence = result[0].confidence || 0;
 
-          confidenceRef.current =
-            resultConfidence;
+          confidenceRef.current = resultConfidence;
 
-          setConfidence(
-            resultConfidence
-          );
+          setConfidence(resultConfidence);
 
           // --------------------------------------------------
           // DEBUG
           // --------------------------------------------------
 
-          console.log(
-            "[SPEECH] Final segment:",
-            text
-          );
+          console.log("[SPEECH] Final segment:", text);
 
           console.log(
             "[SPEECH] Alternatives:",
             alternatives.map((a) => ({
               transcript: a.text,
               confidence: a.confidence,
-            }))
+            })),
           );
 
-          console.log(
-            "[SPEECH] Complete transcript:",
-            updated
-          );
+          console.log("[SPEECH] Complete transcript:", updated);
 
           // --------------------------------------------------
           // CALLBACK
           // --------------------------------------------------
 
-          callbacksRef.current
-            .onFinalTranscript?.(
-              text,
-              {
-                wordCount:
-                  wordCountRef.current,
+          callbacksRef.current.onFinalTranscript?.(text, {
+            wordCount: wordCountRef.current,
 
-                confidence:
-                  resultConfidence,
+            confidence: resultConfidence,
 
-                alternatives,
+            alternatives,
 
-                timestamp: Date.now(),
-              }
-            );
+            timestamp: Date.now(),
+          });
 
           continue;
         }
@@ -641,15 +565,11 @@ const useSpeechRecognition = (options = {}) => {
         currentInterim += `${primaryText} `;
       }
 
-      currentInterim =
-        currentInterim.trim();
+      currentInterim = currentInterim.trim();
 
-      interimTranscriptRef.current =
-        currentInterim;
+      interimTranscriptRef.current = currentInterim;
 
-      setInterimTranscript(
-        currentInterim
-      );
+      setInterimTranscript(currentInterim);
 
       // ------------------------------------------------------
       // UI transcript
@@ -662,13 +582,9 @@ const useSpeechRecognition = (options = {}) => {
       const fullTranscript =
         `${finalTranscriptRef.current} ${currentInterim}`.trim();
 
-      callbacksRef.current
-        .onTranscriptUpdate?.(
-          fullTranscript,
-          {
-            isFinal: false,
-          }
-        );
+      callbacksRef.current.onTranscriptUpdate?.(fullTranscript, {
+        isFinal: false,
+      });
     };
 
     // ========================================================
@@ -676,19 +592,13 @@ const useSpeechRecognition = (options = {}) => {
     // ========================================================
 
     instance.onerror = (event) => {
-      console.warn(
-        "[SPEECH] Recognition error:",
-        event.error
-      );
+      console.warn("[SPEECH] Recognition error:", event.error);
 
       // ------------------------------------------------------
       // NORMAL / RECOVERABLE EVENTS
       // ------------------------------------------------------
 
-      if (
-        event.error === "no-speech" ||
-        event.error === "aborted"
-      ) {
+      if (event.error === "no-speech" || event.error === "aborted") {
         callbacksRef.current.onStatusChange?.({
           type: "recognitionerror",
           error: event.error,
@@ -703,17 +613,11 @@ const useSpeechRecognition = (options = {}) => {
       // ------------------------------------------------------
 
       if (event.error === "network") {
-        console.warn(
-          "[SPEECH] Network error from speech service."
-        );
+        console.warn("[SPEECH] Network error from speech service.");
 
-        setError(
-          "Speech recognition temporarily lost connection."
-        );
+        setError("Speech recognition temporarily lost connection.");
 
-        callbacksRef.current.onError?.(
-          event.error
-        );
+        callbacksRef.current.onError?.(event.error);
 
         callbacksRef.current.onStatusChange?.({
           type: "recognitionerror",
@@ -728,13 +632,9 @@ const useSpeechRecognition = (options = {}) => {
       // REAL ERROR
       // ------------------------------------------------------
 
-      setError(
-        `Speech recognition error: ${event.error}`
-      );
+      setError(`Speech recognition error: ${event.error}`);
 
-      callbacksRef.current.onError?.(
-        event.error
-      );
+      callbacksRef.current.onError?.(event.error);
 
       callbacksRef.current.onStatusChange?.({
         type: "recognitionerror",
@@ -751,11 +651,13 @@ const useSpeechRecognition = (options = {}) => {
         event.error === "not-allowed" ||
         event.error === "service-not-allowed"
       ) {
-        shouldBeRecordingRef.current =
-          false;
+        isPausedRef.current = false;
 
-        manuallyStoppedRef.current =
-          true;
+        shouldBeRecordingRef.current = false;
+
+        manuallyStoppedRef.current = true;
+
+        clearTimeout(restartTimeoutRef.current);
 
         setIsListening(false);
         setIsRecording(false);
@@ -768,26 +670,18 @@ const useSpeechRecognition = (options = {}) => {
     // ========================================================
 
     return () => {
-      console.log(
-        "[SPEECH] Destroying recognition instance"
-      );
+      console.log("[SPEECH] Destroying recognition instance");
 
       // Invalidate any old restart timer.
       recordingSessionRef.current++;
 
-      shouldBeRecordingRef.current =
-        false;
+      shouldBeRecordingRef.current = false;
 
-      manuallyStoppedRef.current =
-        true;
+      manuallyStoppedRef.current = true;
 
       clearInterval(autoSaveRef.current);
-      clearTimeout(
-        silenceTimeoutRef.current
-      );
-      clearTimeout(
-        restartTimeoutRef.current
-      );
+      clearTimeout(silenceTimeoutRef.current);
+      clearTimeout(restartTimeoutRef.current);
 
       try {
         instance.stop();
@@ -802,20 +696,11 @@ const useSpeechRecognition = (options = {}) => {
       instance.onspeechstart = null;
       instance.onspeechend = null;
 
-      if (
-        recognitionRef.current ===
-        instance
-      ) {
-        recognitionRef.current =
-          null;
+      if (recognitionRef.current === instance) {
+        recognitionRef.current = null;
       }
     };
-  }, [
-    continuous,
-    interimResults,
-    language,
-    maxAlternatives,
-  ]);
+  }, [continuous, interimResults, language, maxAlternatives]);
 
   // ==========================================================
   // AUTO SAVE
@@ -833,61 +718,40 @@ const useSpeechRecognition = (options = {}) => {
   // ==========================================================
 
   useEffect(() => {
-    if (
-      autoSaveInterval <= 0 ||
-      !isRecording ||
-      isPaused
-    ) {
+    if (autoSaveInterval <= 0 || !isRecording || isPaused) {
       return;
     }
 
     clearInterval(autoSaveRef.current);
 
     autoSaveRef.current = setInterval(() => {
-      const latestTranscript =
-        finalTranscriptRef.current.trim();
+      const latestTranscript = finalTranscriptRef.current.trim();
 
-      if (
-        callbacksRef.current.onAutoSave &&
-        latestTranscript
-      ) {
+      if (callbacksRef.current.onAutoSave && latestTranscript) {
         callbacksRef.current.onAutoSave({
-          transcript:
-            latestTranscript,
+          transcript: latestTranscript,
 
-          interimTranscript:
-            interimTranscriptRef.current,
+          interimTranscript: interimTranscriptRef.current,
 
           isFinal: true,
 
-          wordCount:
-            wordCountRef.current,
+          wordCount: wordCountRef.current,
 
-          confidence:
-            confidenceRef.current,
+          confidence: confidenceRef.current,
 
-          startTime:
-            startTimeRef.current,
+          startTime: startTimeRef.current,
 
-          elapsedTime:
-            startTimeRef.current
-              ? Date.now() -
-                startTimeRef.current
-              : 0,
+          elapsedTime: startTimeRef.current
+            ? Date.now() - startTimeRef.current
+            : 0,
         });
       }
     }, autoSaveInterval);
 
     return () => {
-      clearInterval(
-        autoSaveRef.current
-      );
+      clearInterval(autoSaveRef.current);
     };
-  }, [
-    autoSaveInterval,
-    isRecording,
-    isPaused,
-  ]);
+  }, [autoSaveInterval, isRecording, isPaused]);
 
   // ==========================================================
   // ELAPSED TIMER
@@ -896,16 +760,9 @@ const useSpeechRecognition = (options = {}) => {
   useEffect(() => {
     let interval = null;
 
-    if (
-      isRecording &&
-      startTimeRef.current &&
-      !isPaused
-    ) {
+    if (isRecording && startTimeRef.current && !isPaused) {
       interval = setInterval(() => {
-        setElapsedTime(
-          Date.now() -
-            startTimeRef.current
-        );
+        setElapsedTime(Date.now() - startTimeRef.current);
       }, 100);
     }
 
@@ -914,40 +771,28 @@ const useSpeechRecognition = (options = {}) => {
         clearInterval(interval);
       }
     };
-  }, [
-    isRecording,
-    isPaused,
-  ]);
+  }, [isRecording, isPaused]);
 
   // ==========================================================
   // START
   // ==========================================================
 
   const start = useCallback(() => {
-    const instance =
-      recognitionRef.current;
+    const instance = recognitionRef.current;
 
     if (!instance || !isSupported) {
-      console.warn(
-        "[SPEECH] Recognition is not available."
-      );
+      console.warn("[SPEECH] Recognition is not available.");
 
       return;
     }
 
-    if (
-      recognitionRunningRef.current
-    ) {
-      console.warn(
-        "[SPEECH] Recognition is already running."
-      );
+    if (recognitionRunningRef.current) {
+      console.warn("[SPEECH] Recognition is already running.");
 
       return;
     }
 
-    console.log(
-      "[SPEECH] Starting NEW answer..."
-    );
+    console.log("[SPEECH] Starting NEW answer...");
 
     // --------------------------------------------------------
     // RESET ANSWER STATE
@@ -964,11 +809,9 @@ const useSpeechRecognition = (options = {}) => {
     setStartTime(null);
     setEndTime(null);
 
-    finalTranscriptRef.current =
-      "";
+    finalTranscriptRef.current = "";
 
-    interimTranscriptRef.current =
-      "";
+    interimTranscriptRef.current = "";
 
     wordCountRef.current = 0;
     confidenceRef.current = 0;
@@ -977,86 +820,59 @@ const useSpeechRecognition = (options = {}) => {
 
     alternativesRef.current = [];
 
-    lastFinalSegmentRef.current =
-      "";
-
+    processedFinalIndexesRef.current.clear();
     // --------------------------------------------------------
     // START RECORDING SESSION
     // --------------------------------------------------------
+    isPausedRef.current = false;
+    shouldBeRecordingRef.current = true;
 
-    shouldBeRecordingRef.current =
-      true;
-
-    manuallyStoppedRef.current =
-      false;
+    manuallyStoppedRef.current = false;
 
     recordingSessionRef.current++;
 
-    clearTimeout(
-      silenceTimeoutRef.current
-    );
+    clearTimeout(silenceTimeoutRef.current);
 
-    clearTimeout(
-      restartTimeoutRef.current
-    );
+    clearTimeout(restartTimeoutRef.current);
 
     callbacksRef.current.onStatusChange?.({
       type: "answerstart",
     });
 
     try {
-      instance.lang =
-        language || "en-US";
+      instance.lang = language || "en-US";
 
-      instance.continuous =
-        continuous;
+      instance.continuous = continuous;
 
-      instance.interimResults =
-        interimResults;
+      instance.interimResults = interimResults;
 
       instance.start();
     } catch (err) {
-      console.error(
-        "[SPEECH] Failed to start:",
-        err
-      );
-
-      shouldBeRecordingRef.current =
-        false;
+      console.error("[SPEECH] Failed to start:", err);
+      isPausedRef.current = false;
+      shouldBeRecordingRef.current = false;
 
       setIsListening(false);
       setIsRecording(false);
 
-      setError(
-        "Could not start microphone. Please try again."
-      );
+      setError("Could not start microphone. Please try again.");
 
-      callbacksRef.current.onError?.(
-        err
-      );
+      callbacksRef.current.onError?.(err);
     }
-  }, [
-    isSupported,
-    language,
-    continuous,
-    interimResults,
-  ]);
+  }, [isSupported, language, continuous, interimResults]);
 
   // ==========================================================
   // STOP
   // ==========================================================
 
   const stop = useCallback(() => {
-    const instance =
-      recognitionRef.current;
+    const instance = recognitionRef.current;
 
     if (!instance) {
       return;
     }
 
-    console.log(
-      "[SPEECH] Manual stop"
-    );
+    console.log("[SPEECH] Manual stop");
 
     // --------------------------------------------------------
     // IMPORTANT:
@@ -1072,34 +888,25 @@ const useSpeechRecognition = (options = {}) => {
 
     recordingSessionRef.current++;
 
-    shouldBeRecordingRef.current =
-      false;
+    isPausedRef.current = false;
 
-    manuallyStoppedRef.current =
-      true;
+    shouldBeRecordingRef.current = false;
 
-    clearTimeout(
-      silenceTimeoutRef.current
-    );
+    manuallyStoppedRef.current = true;
 
-    clearTimeout(
-      restartTimeoutRef.current
-    );
+    clearTimeout(silenceTimeoutRef.current);
+
+    clearTimeout(restartTimeoutRef.current);
 
     callbacksRef.current.onStatusChange?.({
       type: "stoprequested",
     });
 
-    if (
-      recognitionRunningRef.current
-    ) {
+    if (recognitionRunningRef.current) {
       try {
         instance.stop();
       } catch (err) {
-        console.warn(
-          "[SPEECH] Stop failed:",
-          err
-        );
+        console.warn("[SPEECH] Stop failed:", err);
       }
     } else {
       setIsListening(false);
@@ -1113,17 +920,14 @@ const useSpeechRecognition = (options = {}) => {
   // ==========================================================
 
   const pause = useCallback(() => {
-    const instance =
-      recognitionRef.current;
+    const instance = recognitionRef.current;
 
     if (!instance) {
       return;
     }
 
-    console.log(
-      "[SPEECH] Pausing recognition"
-    );
-
+    console.log("[SPEECH] Pausing recognition");
+    isPausedRef.current = true;
     setIsPaused(true);
 
     // --------------------------------------------------------
@@ -1131,34 +935,23 @@ const useSpeechRecognition = (options = {}) => {
     // remains intact.
     // --------------------------------------------------------
 
-    shouldBeRecordingRef.current =
-      false;
+    shouldBeRecordingRef.current = false;
 
-    manuallyStoppedRef.current =
-      true;
+    manuallyStoppedRef.current = true;
 
-    clearTimeout(
-      silenceTimeoutRef.current
-    );
+    clearTimeout(silenceTimeoutRef.current);
 
-    clearTimeout(
-      restartTimeoutRef.current
-    );
+    clearTimeout(restartTimeoutRef.current);
 
     callbacksRef.current.onStatusChange?.({
       type: "pause",
     });
 
-    if (
-      recognitionRunningRef.current
-    ) {
+    if (recognitionRunningRef.current) {
       try {
         instance.stop();
       } catch (err) {
-        console.warn(
-          "[SPEECH] Pause stop failed:",
-          err
-        );
+        console.warn("[SPEECH] Pause stop failed:", err);
       }
     }
   }, []);
@@ -1168,34 +961,25 @@ const useSpeechRecognition = (options = {}) => {
   // ==========================================================
 
   const resume = useCallback(() => {
-    const instance =
-      recognitionRef.current;
+    const instance = recognitionRef.current;
 
     if (!instance || !isSupported) {
       return;
     }
 
-    console.log(
-      "[SPEECH] Resuming recognition"
-    );
-
+    console.log("[SPEECH] Resuming recognition");
+    isPausedRef.current = false;
     setIsPaused(false);
 
-    shouldBeRecordingRef.current =
-      true;
+    shouldBeRecordingRef.current = true;
 
-    manuallyStoppedRef.current =
-      false;
+    manuallyStoppedRef.current = false;
 
     recordingSessionRef.current++;
 
-    clearTimeout(
-      silenceTimeoutRef.current
-    );
+    clearTimeout(silenceTimeoutRef.current);
 
-    clearTimeout(
-      restartTimeoutRef.current
-    );
+    clearTimeout(restartTimeoutRef.current);
 
     setError(null);
 
@@ -1203,70 +987,45 @@ const useSpeechRecognition = (options = {}) => {
       type: "resume",
     });
 
-    if (
-      !recognitionRunningRef.current
-    ) {
+    if (!recognitionRunningRef.current) {
       try {
-        instance.lang =
-          language || "en-US";
+        instance.lang = language || "en-US";
 
-        instance.continuous =
-          continuous;
+        instance.continuous = continuous;
 
-        instance.interimResults =
-          interimResults;
+        instance.interimResults = interimResults;
 
         instance.start();
       } catch (err) {
-        console.warn(
-          "[SPEECH] Resume failed:",
-          err
-        );
+        console.warn("[SPEECH] Resume failed:", err);
       }
     }
-  }, [
-    isSupported,
-    language,
-    continuous,
-    interimResults,
-  ]);
+  }, [isSupported, language, continuous, interimResults]);
 
   // ==========================================================
   // CLEAR
   // ==========================================================
 
   const clear = useCallback(() => {
-    console.log(
-      "[SPEECH] Clearing recording"
-    );
+    console.log("[SPEECH] Clearing recording");
 
-    const instance =
-      recognitionRef.current;
+    const instance = recognitionRef.current;
 
     recordingSessionRef.current++;
 
-    shouldBeRecordingRef.current =
-      false;
+    isPausedRef.current = false;
 
-    manuallyStoppedRef.current =
-      true;
+    shouldBeRecordingRef.current = false;
 
-    clearInterval(
-      autoSaveRef.current
-    );
+    manuallyStoppedRef.current = true;
 
-    clearTimeout(
-      silenceTimeoutRef.current
-    );
+    clearInterval(autoSaveRef.current);
 
-    clearTimeout(
-      restartTimeoutRef.current
-    );
+    clearTimeout(silenceTimeoutRef.current);
 
-    if (
-      instance &&
-      recognitionRunningRef.current
-    ) {
+    clearTimeout(restartTimeoutRef.current);
+
+    if (instance && recognitionRunningRef.current) {
       try {
         instance.stop();
       } catch (err) {
@@ -1298,11 +1057,9 @@ const useSpeechRecognition = (options = {}) => {
     // Reset refs
     // --------------------------------------------------------
 
-    finalTranscriptRef.current =
-      "";
+    finalTranscriptRef.current = "";
 
-    interimTranscriptRef.current =
-      "";
+    interimTranscriptRef.current = "";
 
     wordCountRef.current = 0;
     confidenceRef.current = 0;
@@ -1311,11 +1068,8 @@ const useSpeechRecognition = (options = {}) => {
 
     alternativesRef.current = [];
 
-    lastFinalSegmentRef.current =
-      "";
+    processedFinalIndexesRef.current.clear();
 
-    recognitionRunningRef.current =
-      false;
 
     callbacksRef.current.onStatusChange?.({
       type: "clear",
@@ -1351,29 +1105,25 @@ const useSpeechRecognition = (options = {}) => {
     resume,
     clear,
 
-    hasTranscript:
-      !!finalTranscriptRef.current.trim(),
+    hasTranscript: !!finalTranscriptRef.current.trim(),
 
     isEmpty:
       !finalTranscriptRef.current.trim() &&
       !interimTranscriptRef.current.trim(),
 
-    isFinal:
-      !!finalTranscriptRef.current.trim(),
+    isFinal: !!finalTranscriptRef.current.trim(),
 
     // --------------------------------------------------------
     // Latest authoritative transcript
     // --------------------------------------------------------
 
-    getLatestTranscript: () =>
-      finalTranscriptRef.current.trim(),
+    getLatestTranscript: () => finalTranscriptRef.current.trim(),
 
     // --------------------------------------------------------
     // Latest recognition alternatives
     // --------------------------------------------------------
 
-    getLatestAlternatives: () =>
-      alternativesRef.current,
+    getLatestAlternatives: () => alternativesRef.current,
   };
 };
 
