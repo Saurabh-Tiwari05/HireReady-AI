@@ -1,8 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import Navbar from "../components/ui/Navbar";
-import SectionTitle from "../components/ui/SectionTitle";
 import GlassCard from "../components/ui/GlassCard";
 import Button from "../components/ui/Button";
 import ResumeUpload from "../components/resume/ResumeUpload";
@@ -11,48 +10,149 @@ import CandidateProfileReview from "../components/resume/CandidateProfileReview"
 const BASE = import.meta.env.VITE_API_URL || "/api";
 const PARSE_TIMEOUT_MS = 45_000;
 const ANALYSIS_TIMEOUT_MS = 90_000;
+const STEPS = [
+  { id: "upload", label: "Upload", detail: "Your resume", icon: "01" },
+  { id: "parse", label: "Analyze", detail: "AI insights", icon: "02" },
+  { id: "review", label: "Review", detail: "Your profile", icon: "03" },
+  { id: "setup", label: "Configure", detail: "Interview setup", icon: "04" },
+];
+const DEFAULT_DIFFICULTIES = [
+  {
+    value: "easy",
+    label: "Easy",
+    description: "Foundations and entry-level concepts",
+  },
+  {
+    value: "medium",
+    label: "Medium",
+    description: "Balanced conceptual and practical questions",
+  },
+  {
+    value: "hard",
+    label: "Hard",
+    description: "Advanced reasoning and challenging problems",
+  },
+];
+const DEFAULT_TYPES = [
+  { value: "mixed", label: "Mixed", description: "Technical and behavioral" },
+  {
+    value: "technical",
+    label: "Technical",
+    description: "Concepts and problem solving",
+  },
+  {
+    value: "behavioral",
+    label: "Behavioral",
+    description: "Communication and experience",
+  },
+];
+const DEFAULT_DURATIONS = [
+  { value: 15, label: "15 min" },
+  { value: 30, label: "30 min" },
+  { value: 45, label: "45 min" },
+  { value: 60, label: "60 min" },
+];
 
 async function fetchApi(url, options = {}, timeoutMs = 30_000) {
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
-
   try {
     const response = await fetch(url, {
       ...options,
       signal: controller.signal,
     });
     const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
+    if (!response.ok)
       throw new Error(
         payload.error ||
           payload.message ||
           `Request failed (${response.status})`,
       );
-    }
     return payload;
   } catch (error) {
-    if (error.name === "AbortError") {
+    if (error.name === "AbortError")
       throw new Error("The request timed out. Please try again.");
-    }
     throw error;
   } finally {
     window.clearTimeout(timeout);
   }
 }
 
-const STEPS = [
-  { id: "upload", label: "Upload Resume", icon: "📄" },
-  { id: "parse", label: "AI Analysis", icon: "🤖" },
-  { id: "review", label: "Review Profile", icon: "✅" },
-  { id: "setup", label: "Interview Setup", icon: "🎯" },
-];
+const fieldClass =
+  "w-full rounded-2xl border border-white/10 bg-[#10141e] px-4 py-3.5 text-sm text-white outline-none transition-all placeholder:text-white/25 focus:border-cyan-400/60 focus:ring-2 focus:ring-cyan-400/10";
+const cardClass = "rounded-2xl border border-white/10 bg-white/[0.035]";
+const pillClass =
+  "rounded-full border border-white/10 bg-white/[0.05] px-3 py-1.5 text-xs text-white/65";
+const toList = (value) => (Array.isArray(value) ? value : []);
+const readable = (value) =>
+  String(value ?? "")
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+
+function WizardHeading({ eyebrow, title, description }) {
+  return (
+    <div className="mb-7">
+      <p className="mb-2 text-xs font-semibold uppercase tracking-[0.22em] text-accent">
+        {eyebrow}
+      </p>
+      <h1 className="text-3xl font-bold tracking-tight text-white md:text-4xl">
+        {title}
+      </h1>
+      <p className="mt-3 max-w-2xl text-sm leading-6 text-white/50">
+        {description}
+      </p>
+    </div>
+  );
+}
+
+function StepIndicator({ currentStep }) {
+  return (
+    <div className="mb-9 rounded-2xl border border-white/10 bg-[#0b1019]/90 p-3 backdrop-blur-xl sm:p-4">
+      <div className="grid grid-cols-4 gap-2">
+        {STEPS.map((step, index) => {
+          const active = index === currentStep;
+          const complete = index < currentStep;
+          return (
+            <div
+              key={step.id}
+              className={`flex items-center gap-2 rounded-xl px-2 py-2 sm:px-3 ${active ? "bg-accent/10" : ""}`}
+              aria-current={active ? "step" : undefined}
+            >
+              <div
+                className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-xs font-bold sm:h-9 sm:w-9 ${complete ? "bg-emerald-400/15 text-emerald-300" : active ? "bg-accent text-black" : "bg-white/5 text-white/35"}`}
+              >
+                {complete ? "✓" : step.icon}
+              </div>
+              <div className="min-w-0">
+                <p
+                  className={`truncate text-xs font-semibold sm:text-sm ${active ? "text-white" : complete ? "text-emerald-300" : "text-white/40"}`}
+                >
+                  {step.label}
+                </p>
+                <p className="hidden truncate text-[11px] text-white/35 lg:block">
+                  {step.detail}
+                </p>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <div className="mt-3 h-1 overflow-hidden rounded-full bg-white/10">
+        <motion.div
+          className="h-full rounded-full bg-gradient-to-r from-cyan-400 to-violet-400"
+          animate={{ width: `${(currentStep / (STEPS.length - 1)) * 100}%` }}
+          transition={{ duration: 0.35 }}
+        />
+      </div>
+    </div>
+  );
+}
 
 export default function ResumePage() {
   const navigate = useNavigate();
   const [currentStep, setCurrentStep] = useState(0);
   const [resume, setResume] = useState(null);
   const [parsedData, setParsedData] = useState(null);
-
   const [profile, setProfile] = useState(null);
   const [parsing, setParsing] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
@@ -66,147 +166,70 @@ export default function ResumePage() {
   const [wizardOptions, setWizardOptions] = useState(null);
   const [creatingSession, setCreatingSession] = useState(false);
   const [error, setError] = useState(null);
-  const loadExistingResume = async () => {
-    try {
-      const token = localStorage.getItem("hr_token");
+  const uploadGenerationRef = useRef(0);
+  const creatingRef = useRef(false);
 
-      const response = await fetch(`${BASE}/resume/current`, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
-
-      if (!response.ok) {
-        return;
-      }
-
-      const data = await response.json();
-
-      const currentResume = data?.data?.resume;
-
-      if (!currentResume) {
-        return;
-      }
-
-      setResume(currentResume);
-
-      if (currentResume.parsed_data?.cleanedText) {
-        setParsedData({
-          textLength: currentResume.parsed_data.cleanedText.length,
-          sections: currentResume.parsed_data.sections || {},
-          preview: currentResume.parsed_data.cleanedText.substring(0, 500),
-        });
-
-        setCurrentStep(1);
-      }
-    } catch (err) {
-      console.error("Failed to load existing resume:", err);
-    }
-  };
-
-  const fetchWizardOptions = async () => {
-    try {
-      const token = localStorage.getItem("hr_token");
-      const response = await fetch(`${BASE}/interview-setup/wizard/options`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (response.ok) {
-        const data = await response.json();
-        setWizardOptions(data.data);
-      }
-    } catch (err) {
-      console.error("Failed to fetch wizard options:", err);
-    }
-  };
-
-  const checkExistingProfile = async () => {
-    try {
-      const token = localStorage.getItem("hr_token");
-      const response = await fetch(`${BASE}/resume/profile/me/status`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (response.ok) {
-        const data = await response.json();
-        if (data.data.exists && data.data.profile) {
-          setProfile(data.data.profile);
-          setCurrentStep(3); // Go to interview setup
+  useEffect(() => {
+    let cancelled = false;
+    const token = localStorage.getItem("hr_token");
+    if (!token) return;
+    const headers = { Authorization: `Bearer ${token}` };
+    const load = async () => {
+      const [optionsResult, profileResult, resumeResult] =
+        await Promise.allSettled([
+          fetch(`${BASE}/interview-setup/wizard/options`, { headers }).then(
+            async (r) => (r.ok ? (await r.json()).data : null),
+          ),
+          fetch(`${BASE}/resume/profile/me/status`, { headers }).then(
+            async (r) => (r.ok ? (await r.json()).data : null),
+          ),
+          fetch(`${BASE}/resume/current`, { headers }).then(async (r) =>
+            r.ok ? (await r.json()).data?.resume : null,
+          ),
+        ]);
+      if (cancelled || uploadGenerationRef.current !== 0) return;
+      if (optionsResult.status === "fulfilled")
+        setWizardOptions(optionsResult.value);
+      if (resumeResult.status === "fulfilled" && resumeResult.value) {
+        const existing = resumeResult.value;
+        setResume(existing);
+        if (existing.parsed_data?.cleanedText) {
+          setParsedData({
+            textLength: existing.parsed_data.cleanedText.length,
+            sections: existing.parsed_data.sections || {},
+            preview: existing.parsed_data.cleanedText.substring(0, 500),
+          });
+          setCurrentStep(1);
         }
       }
-    } catch (err) {
-      console.error("Failed to check profile:", err);
-    }
-  };
-  useEffect(() => {
-    fetchWizardOptions();
-    checkExistingProfile();
-    loadExistingResume();
+      if (
+        profileResult.status === "fulfilled" &&
+        profileResult.value?.exists &&
+        profileResult.value.profile
+      ) {
+        setProfile(profileResult.value.profile);
+        setCurrentStep(3);
+      }
+    };
+    load();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  const handleUploadComplete = async (uploadedResume) => {
-  // Clear everything belonging to the previous resume
-  setProfile(null);
-  setParsedData(null);
-  setError(null);
-  setParsing(false);
-  setAnalyzing(false);
+  const handleConfigChange = (field, value) =>
+    setInterviewConfig((prev) => ({ ...prev, [field]: value }));
 
-  // Set the new resume
-  setResume(uploadedResume);
-  setCurrentStep(1);
-
-  await parseAndAnalyze(uploadedResume);
-};
-
-  const parseAndAnalyze = async (resumeToProcess) => {
-    if (!resumeToProcess?.id) {
-      setError("The uploaded resume is missing an ID. Please upload it again.");
-      return;
-    }
-
-    setParsing(true);
-    setAnalyzing(false);
-    setError(null);
-
-    try {
-      const token = localStorage.getItem("hr_token");
-      const data = await fetchApi(
-        `${BASE}/resume/${resumeToProcess.id}/parse`,
-        {
-          method: "POST",
-          headers: { Authorization: `Bearer ${token}` },
-        },
-        PARSE_TIMEOUT_MS,
-      );
-
-      const parsed = data?.data?.parsedData;
-      if (!parsed || !parsed.textLength) {
-        throw new Error(
-          "No readable text was found in this resume. Please upload a text-based PDF.",
-        );
-      }
-
-      setParsedData(parsed);
-      setParsing(false);
-      await handleAnalyze(resumeToProcess);
-    } catch (err) {
-      setError(err.message || "Unable to parse the resume.");
-    } finally {
-      setParsing(false);
-    }
-  };
-
-  const handleAnalyze = async (resumeToAnalyze = resume) => {
-    console.log("[AI] Resume selected for analysis:", resumeToAnalyze);
+  const handleAnalyze = async (
+    resumeToAnalyze = resume,
+    generation = uploadGenerationRef.current,
+  ) => {
     if (!resumeToAnalyze?.id) {
-      setError(
-        "No resume is selected. Please select a stored resume or upload a new one.",
-      );
+      setError("No resume selected. Upload a resume and try again.");
       return;
     }
-
     setAnalyzing(true);
     setError(null);
-
     try {
       const token = localStorage.getItem("hr_token");
       const data = await fetchApi(
@@ -224,344 +247,291 @@ export default function ResumePage() {
         },
         ANALYSIS_TIMEOUT_MS,
       );
-
-      if (!data?.data?.profile) {
+      if (!data?.data?.profile)
         throw new Error(
-          "Analysis completed without creating a candidate profile. Please try again.",
+          "Analysis finished without a candidate profile. Please retry.",
         );
-      }
+      if (generation !== uploadGenerationRef.current) return;
       setProfile(data.data.profile);
-      setCurrentStep(2); // Go to review step
+      setCurrentStep(2);
     } catch (err) {
-      setError(err.message || "Analysis failed");
+      if (generation === uploadGenerationRef.current)
+        setError(err.message || "Analysis failed");
     } finally {
-      setAnalyzing(false);
+      if (generation === uploadGenerationRef.current) setAnalyzing(false);
     }
   };
 
-  const handleProfileSave = (savedProfile) => {
-    setProfile(savedProfile);
-    setCurrentStep(3); // Go to interview setup
+  const parseAndAnalyze = async (
+    resumeToProcess,
+    generation = uploadGenerationRef.current,
+  ) => {
+    if (!resumeToProcess?.id) {
+      setError("Uploaded resume is missing an ID. Please upload again.");
+      return;
+    }
+    setParsing(true);
+    setAnalyzing(false);
+    setError(null);
+    try {
+      const token = localStorage.getItem("hr_token");
+      const data = await fetchApi(
+        `${BASE}/resume/${resumeToProcess.id}/parse`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+        },
+        PARSE_TIMEOUT_MS,
+      );
+      const parsed = data?.data?.parsedData;
+      if (!parsed || !parsed.textLength)
+        throw new Error("No readable text found. Upload a text-based PDF.");
+      if (generation !== uploadGenerationRef.current) return;
+      setParsedData(parsed);
+      setParsing(false);
+      await handleAnalyze(resumeToProcess, generation);
+    } catch (err) {
+      if (generation === uploadGenerationRef.current)
+        setError(err.message || "Unable to parse resume");
+    } finally {
+      if (generation === uploadGenerationRef.current) setParsing(false);
+    }
+  };
+
+  const handleUploadComplete = async (uploadedResume) => {
+    const generation = ++uploadGenerationRef.current;
+    setProfile(null);
+    setParsedData(null);
+    setError(null);
+    setParsing(false);
+    setAnalyzing(false);
+    setResume(uploadedResume);
+    setCurrentStep(1);
+    await parseAndAnalyze(uploadedResume, generation);
   };
 
   const handleCreateSession = async () => {
-  console.log("CREATE SESSION CLICKED");
-
-  setCreatingSession(true);
-  setError(null);
-
-  try {
-    const token = localStorage.getItem("hr_token");
-    console.log("Token exists:", !!token);
-
-    console.log("Sending session request:", interviewConfig);
-
-    const response = await fetch(`${BASE}/interview-setup/sessions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify(interviewConfig),
-    });
-
-    console.log("Response received:", response.status, response.statusText);
-
-    const responseText = await response.text();
-    console.log("Raw response:", responseText);
-
-    if (!response.ok) {
-      throw new Error(responseText);
+    if (creatingRef.current) return;
+    if (!interviewConfig.company.trim() || !interviewConfig.role.trim()) {
+      setError("Please enter both a target company and a target role.");
+      return;
     }
-
-    const data = JSON.parse(responseText);
-    console.log("Parsed session:", data.data);
-
-    const qs = new URLSearchParams({
-      sessionId: data.data.interview.id,
-      company: interviewConfig.company,
-      role: interviewConfig.role,
-      difficulty: interviewConfig.difficulty,
-      type: interviewConfig.type,
-      duration: String(interviewConfig.durationMinutes),
-    });
-
-    console.log("Navigating to:", `/interview?${qs.toString()}`);
-
-    navigate(`/interview?${qs.toString()}`);
-
-  } catch (err) {
-    console.error("CREATE SESSION ERROR:", err);
-    setError(err.message || "Failed to create session");
-  } finally {
-    setCreatingSession(false);
-  }
-};
-
-  const handleConfigChange = (field, value) => {
-    setInterviewConfig((prev) => ({ ...prev, [field]: value }));
-  };
-
-  const canProceed = () => {
-    switch (currentStep) {
-      case 0:
-        return !!resume;
-      case 1:
-        return !!profile;
-      case 2:
-        return !!profile;
-      case 3:
-        return !!interviewConfig.company && !!interviewConfig.role;
-      default:
-        return false;
+    creatingRef.current = true;
+    setCreatingSession(true);
+    setError(null);
+    try {
+      const token = localStorage.getItem("hr_token");
+      if (!token)
+        throw new Error("Your session has expired. Please log in again.");
+      const response = await fetchApi(
+        `${BASE}/interview-setup/sessions`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            ...interviewConfig,
+            company: interviewConfig.company.trim(),
+            role: interviewConfig.role.trim(),
+          }),
+        },
+        60_000,
+      );
+      const id = response?.data?.interview?.id;
+      if (!id)
+        throw new Error("Session was created but its interview ID is missing.");
+      const qs = new URLSearchParams({
+        sessionId: String(id),
+        company: interviewConfig.company.trim(),
+        role: interviewConfig.role.trim(),
+        difficulty: interviewConfig.difficulty,
+        type: interviewConfig.type,
+        duration: String(interviewConfig.durationMinutes),
+      });
+      navigate(`/interview?${qs.toString()}`);
+    } catch (err) {
+      setError(err.message || "Failed to create interview session");
+    } finally {
+      creatingRef.current = false;
+      setCreatingSession(false);
     }
   };
+
+  const goBack = () => {
+    setError(null);
+    setCurrentStep((step) => Math.max(0, step - 1));
+  };
+  const canContinue =
+    currentStep === 0
+      ? !!resume
+      : currentStep === 1 || currentStep === 2
+        ? !!profile
+        : false;
 
   return (
-    <div className="min-h-screen bg-bg pt-20">
+    <div className="min-h-screen bg-bg pt-24">
       <Navbar />
-
-      {/* Progress Bar */}
-      <div className="fixed top-16 left-0 right-0 z-50 bg-bg/95 backdrop-blur-sm border-b border-white/10">
-        <div className="mx-auto max-w-5xl px-6">
-          <div className="flex items-center justify-between h-12">
-            {STEPS.map((step, index) => (
-              <div key={step.id} className="flex items-center">
-                <div
-                  className={`flex items-center gap-2 px-4 ${
-                    index <= currentStep ? "text-accent" : "text-white/40"
-                  }`}
-                >
-                  <span className="text-xl">{step.icon}</span>
-                  <span className="hidden sm:block text-sm font-medium">
-                    {step.label}
-                  </span>
-                </div>
-                {index < STEPS.length - 1 && (
-                  <div
-                    className={`h-px w-16 mx-2 ${
-                      index < currentStep ? "bg-accent" : "bg-white/10"
-                    }`}
-                  />
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      <main id="main" className="relative pt-28 pb-12">
-        <div className="mx-auto max-w-5xl px-6">
+      <main
+        id="main"
+        className="relative mx-auto max-w-6xl px-4 pb-20 pt-8 sm:px-6"
+      >
+        <div className="pointer-events-none absolute -top-24 left-1/2 h-80 w-80 -translate-x-1/2 rounded-full bg-accent/5 blur-3xl" />
+        <div className="relative">
+          <StepIndicator currentStep={currentStep} />
           {error && (
             <motion.div
-              initial={{ opacity: 0, y: -20 }}
+              initial={{ opacity: 0, y: -8 }}
               animate={{ opacity: 1, y: 0 }}
-              className="mb-6 p-4 rounded-xl bg-red-400/10 border border-red-400/30 text-red-400"
+              role="alert"
+              className="mb-6 rounded-2xl border border-red-400/25 bg-red-400/10 p-4 text-sm text-red-200"
             >
               {error}
             </motion.div>
           )}
-
-          {/* Step Content */}
           <AnimatePresence mode="wait">
             <motion.div
               key={currentStep}
-              initial={{ opacity: 0, x: 20 }}
+              initial={{ opacity: 0, x: 18 }}
               animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: -20 }}
-              transition={{ duration: 0.3 }}
-              className="space-y-6"
+              exit={{ opacity: 0, x: -18 }}
+              transition={{ duration: 0.23 }}
             >
-              {/* Step 0: Upload Resume */}
               {currentStep === 0 && (
                 <div>
-                  <SectionTitle
-                    title="Upload Your Resume"
-                    gradient={["Upload"]}
-                    subtitle="Upload a text-based PDF. We'll extract and analyze your experience."
+                  <WizardHeading
+                    eyebrow="Step 01 / 04"
+                    title="Start with your resume"
+                    description="Upload a text-based resume to personalize your AI interview."
                   />
                   <ResumeUpload onUploadComplete={handleUploadComplete} />
-                  <div className="text-center text-white/50 text-sm">
-                    Maximum file size: 10MB • Supported formats: PDF, DOC, DOCX
-                  </div>
+                  <p className="mt-4 text-center text-xs text-white/40">
+                    Upload a supported text-based document. File limits depend
+                    on your upload service.
+                  </p>
                 </div>
               )}
-
-              {/* Step 1: AI Analysis */}
               {currentStep === 1 && (
                 <div>
-                  <SectionTitle
-                    title="AI Resume Analysis"
-                    gradient={["AI Analysis"]}
-                    subtitle="Our AI will parse your resume and build a comprehensive candidate profile."
+                  <WizardHeading
+                    eyebrow="Step 02 / 04"
+                    title="AI resume analysis"
+                    description="We extract your skills, experience and projects to tailor your interview questions."
                   />
-
-                  {profile ? (
-                    <GlassCard className="p-6 text-center" glow="#34D399">
-                      <motion.div
-                        initial={{ scale: 0 }}
-                        animate={{ scale: 1 }}
-                        className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-emerald-400/20"
-                      >
-                        <svg
-                          className="h-8 w-8 text-emerald-400"
-                          fill="currentColor"
-                          viewBox="0 0 20 20"
-                        >
-                          <path
-                            fillRule="evenodd"
-                            d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z"
-                            clipRule="evenodd"
-                          />
-                        </svg>
-                      </motion.div>
-                      <h3 className="text-xl font-bold text-white mb-2">
-                        Analysis Complete!
-                      </h3>
-                      <p className="text-white/60 mb-6">
-                        Your candidate profile has been created. Review it in
-                        the next step.
-                      </p>
-                      <Button onClick={() => setCurrentStep(2)} size="lg">
-                        Review Profile
-                      </Button>
-                    </GlassCard>
-                  ) : (
-                    <>
-                      {resume && parsing && (
-                        <GlassCard className="p-6 text-center" glow="#00F2FF">
-                          <h3 className="text-xl font-bold text-white mb-2">
-                            Parsing Your Resume
-                          </h3>
-                          <p className="text-white/60">
-                            Extracting readable text before AI analysis...
-                          </p>
-                        </GlassCard>
-                      )}
-
-                      {resume && !parsedData && !parsing && !analyzing && (
-                        <GlassCard className="p-6">
-                          <div className="text-center">
-                            <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-accent/10">
-                              <span className="text-3xl">🤖</span>
-                            </div>
-                            <h3 className="text-xl font-bold text-white mb-2">
-                              Ready for AI Analysis
-                            </h3>
-                            <p className="text-white/60 mb-6">
-                              Resume uploaded: <strong>{resume.title}</strong>{" "}
-                              (v{resume.version})
-                            </p>
-                            <p className="text-sm text-red-300 mb-4">
-                              Parsing did not complete.
-                            </p>
-                            <Button
-                              onClick={() => parseAndAnalyze(resume)}
-                              size="lg"
-                            >
-                              Retry parsing
-                            </Button>
-                          </div>
-                        </GlassCard>
-                      )}
-
-                      {parsedData && !profile && !analyzing && !parsing && (
-                        <GlassCard className="p-6">
-                          <div className="text-center">
-                            <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-accent/10">
-                              <span className="text-3xl">🤖</span>
-                            </div>
-
-                            <h3 className="text-xl font-bold text-white mb-2">
-                              Ready for AI Analysis
-                            </h3>
-
-                            <p className="text-white/60 mb-2">
-                              Resume uploaded: <strong>{resume.title}</strong>{" "}
-                              (v{resume.version})
-                            </p>
-
-                            <p className="text-xs text-white/30 mb-4">
-                              Resume ID: {resume.id || "Missing"}
-                            </p>
-
-                            <div className="flex items-center justify-center gap-3">
-                              <input
-                                placeholder="Target Role (optional)"
-                                value={interviewConfig.role}
-                                onChange={(e) =>
-                                  handleConfigChange("role", e.target.value)
-                                }
-                                className="w-full max-w-xs rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white placeholder-white/30 focus:border-accent/50 focus:outline-none"
-                              />
-
-                              <input
-                                placeholder="Target Company (optional)"
-                                value={interviewConfig.company}
-                                onChange={(e) =>
-                                  handleConfigChange("company", e.target.value)
-                                }
-                                className="w-full max-w-xs rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white placeholder-white/30 focus:border-accent/50 focus:outline-none"
-                              />
-                            </div>
-
-                            <Button
-                              onClick={() => handleAnalyze(resume)}
-                              size="lg"
-                              className="mt-4"
-                              disabled={analyzing || !resume?.id}
-                            >
-                              {analyzing ? "Analyzing..." : "Start AI Analysis"}
-                            </Button>
-                          </div>
-                        </GlassCard>
-                      )}
-
-                      {analyzing && (
-                        <GlassCard className="p-8 text-center" glow="#00F2FF">
+                  <GlassCard
+                    className="mx-auto max-w-3xl p-7 text-center sm:p-10"
+                    glow="#00F2FF"
+                  >
+                    {parsing || analyzing ? (
+                      <>
+                        <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-2xl border border-accent/30 bg-accent/10 text-3xl">
+                          {parsing ? "📄" : "✦"}
+                        </div>
+                        <div className="mx-auto mb-4 h-7 w-7 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+                        <h2 className="text-xl font-semibold text-white">
+                          {parsing
+                            ? "Reading your resume"
+                            : "Building your candidate profile"}
+                        </h2>
+                        <p className="mt-2 text-sm text-white/50">
+                          {parsing
+                            ? "Extracting text and identifying sections..."
+                            : "Analyzing skills, strengths and areas to improve..."}
+                        </p>
+                        <div className="mx-auto mt-6 h-1.5 max-w-sm overflow-hidden rounded-full bg-white/10">
                           <motion.div
-                            animate={{ rotate: 360 }}
+                            className="h-full w-1/3 rounded-full bg-accent"
+                            animate={{ x: ["-100%", "300%"] }}
                             transition={{
-                              duration: 2,
                               repeat: Infinity,
-                              ease: "linear",
+                              duration: 1.8,
+                              ease: "easeInOut",
                             }}
-                            className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-accent to-cyan-400"
-                          >
-                            <span className="text-2xl">🤖</span>
-                          </motion.div>
-                          <h3 className="text-xl font-bold text-white mb-2">
-                            Analyzing Your Resume
-                          </h3>
-                          <p className="text-white/60">
-                            Our AI is extracting your skills, experience, and
-                            building your candidate profile...
-                          </p>
-                          <div className="mt-6 h-2 bg-white/10 rounded-full overflow-hidden">
-                            <motion.div
-                              className="h-full bg-gradient-to-r from-accent to-cyan-400"
-                              animate={{ width: ["0%", "100%"] }}
-                              transition={{ duration: 10, ease: "linear" }}
-                            />
-                          </div>
-                        </GlassCard>
-                      )}
-                    </>
-                  )}
+                          />
+                        </div>
+                      </>
+                    ) : profile ? (
+                      <>
+                        <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-emerald-400/15 text-3xl text-emerald-300">
+                          ✓
+                        </div>
+                        <h2 className="text-xl font-semibold text-white">
+                          Analysis complete
+                        </h2>
+                        <p className="mt-2 text-sm text-white/50">
+                          Your profile is ready to review.
+                        </p>
+                        <Button
+                          className="mt-6"
+                          onClick={() => setCurrentStep(2)}
+                        >
+                          Review Profile →
+                        </Button>
+                      </>
+                    ) : (
+                      <>
+                        <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-accent/10 text-3xl">
+                          ✦
+                        </div>
+                        <h2 className="text-xl font-semibold text-white">
+                          Ready to analyze
+                        </h2>
+                        <p className="mt-2 text-sm text-white/50">
+                          {resume?.title ||
+                            resume?.original_filename ||
+                            "Your resume"}
+                        </p>
+                        <div className="mx-auto mt-6 grid max-w-xl gap-3 sm:grid-cols-2">
+                          <input
+                            aria-label="Target role for analysis (optional)"
+                            placeholder="Target role (optional)"
+                            value={interviewConfig.role}
+                            onChange={(e) =>
+                              handleConfigChange("role", e.target.value)
+                            }
+                            className={fieldClass}
+                          />
+                          <input
+                            aria-label="Target company for analysis (optional)"
+                            placeholder="Target company (optional)"
+                            value={interviewConfig.company}
+                            onChange={(e) =>
+                              handleConfigChange("company", e.target.value)
+                            }
+                            className={fieldClass}
+                          />
+                        </div>
+                        <Button
+                          className="mt-5"
+                          onClick={() =>
+                            parsedData
+                              ? handleAnalyze(resume)
+                              : parseAndAnalyze(resume)
+                          }
+                          disabled={!resume?.id}
+                        >
+                          {parsedData
+                            ? "Start AI Analysis"
+                            : "Parse & Analyze Resume"}
+                        </Button>
+                      </>
+                    )}
+                  </GlassCard>
                 </div>
               )}
-
-              {/* Step 2: Review Profile */}
               {currentStep === 2 && profile && (
                 <CandidateProfileReview
                   profile={profile}
-                  onSave={handleProfileSave}
+                  onSave={(saved) => {
+                    setProfile(saved);
+                    setCurrentStep(3);
+                    setError(null);
+                  }}
                   onCancel={() => setCurrentStep(1)}
                   editable
                 />
               )}
-
-              {/* Step 3: Interview Setup Wizard */}
               {currentStep === 3 && (
                 <InterviewSetupWizard
                   profile={profile}
@@ -570,39 +540,37 @@ export default function ResumePage() {
                   onCreateSession={handleCreateSession}
                   creatingSession={creatingSession}
                   wizardOptions={wizardOptions}
-                  onBack={() => setCurrentStep(2)}
+                  onBack={goBack}
                 />
               )}
             </motion.div>
           </AnimatePresence>
-
-          {/* Navigation */}
-          <div className="mt-8 flex items-center justify-between">
-            <Button
-              variant="ghost"
-              onClick={() => setCurrentStep(Math.max(0, currentStep - 1))}
-              disabled={currentStep === 0}
-            >
-              ← Back
-            </Button>
-            <Button
-              onClick={() =>
-                setCurrentStep(Math.min(STEPS.length - 1, currentStep + 1))
-              }
-              disabled={!canProceed() || currentStep === STEPS.length - 1}
-            >
-              {currentStep === STEPS.length - 1
-                ? "Create Session"
-                : "Continue →"}
-            </Button>
-          </div>
+          {currentStep < 3 && (
+            <div className="mt-8 flex items-center justify-between gap-3 border-t border-white/10 pt-6">
+              <Button
+                variant="ghost"
+                onClick={goBack}
+                disabled={currentStep === 0 || parsing || analyzing}
+              >
+                ← Back
+              </Button>
+              <Button
+                onClick={() => {
+                  setError(null);
+                  setCurrentStep((step) => Math.min(3, step + 1));
+                }}
+                disabled={!canContinue || parsing || analyzing}
+              >
+                Continue →
+              </Button>
+            </div>
+          )}
         </div>
       </main>
     </div>
   );
 }
 
-// Interview Setup Wizard Component
 function InterviewSetupWizard({
   profile,
   config,
@@ -612,233 +580,442 @@ function InterviewSetupWizard({
   wizardOptions,
   onBack,
 }) {
+  const [showDetails, setShowDetails] = useState(false);
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const analysis = profile?.analysis || {};
+  const name = profile?.full_name || profile?.name || "Candidate";
+  const experience = Number(analysis.totalYearsExperience);
+  const experienceLabel = Number.isFinite(experience)
+    ? experience === 0
+      ? "Fresher / Student"
+      : `${experience} ${experience === 1 ? "year" : "years"} experience`
+    : "Experience not specified";
+  const skills = toList(profile?.skills?.technical);
+  const strengths = toList(analysis.strongAreas);
+  const weaknesses = toList(analysis.weakAreas);
+  const focusAreas = toList(analysis.interviewFocusAreas);
+  const difficulties = toList(wizardOptions?.difficulties).length
+    ? wizardOptions.difficulties
+    : DEFAULT_DIFFICULTIES;
+  const types = toList(wizardOptions?.types).length
+    ? wizardOptions.types
+    : DEFAULT_TYPES;
+  const durations = toList(wizardOptions?.durations).length
+    ? wizardOptions.durations
+    : DEFAULT_DURATIONS;
+  const selectedDifficulty = difficulties.find(
+    (d) => String(d.value) === String(config.difficulty),
+  );
+  const selectedType = types.find(
+    (t) => String(t.value) === String(config.type),
+  );
+  const ready = Boolean(config.company.trim() && config.role.trim());
+  const initials =
+    name
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((part) => part[0].toUpperCase())
+      .join("") || "HR";
+
   return (
     <div className="space-y-6">
-      <SectionTitle
-        title="Interview Setup Wizard"
-        gradient={["Interview Setup"]}
-        subtitle="Configure your interview session. The AI will use this context to generate tailored questions."
+      <WizardHeading
+        eyebrow="Step 04 / 04 · Final step"
+        title="Design your mock interview"
+        description="Set your target role and preferences. HireReady AI will use your saved candidate profile to tailor questions."
       />
 
-      {/* Profile Summary */}
-      <GlassCard className="p-4" glow="#A78BFA">
-        <div className="flex items-center gap-4">
-          <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-[#a78bfa] to-[#60a5fa] text-xl font-bold text-bg">
-            👤
-          </div>
-          <div className="flex-1">
-            <h3 className="font-bold text-white">
-              {profile.full_name || "Candidate"}
-            </h3>
-            <p className="text-sm text-white/60">
-              {profile.analysis?.primaryRole ||
-                profile.preferred_role ||
-                "Software Engineer"}{" "}
-              · {profile.analysis?.totalYearsExperience || 0}+ years
-            </p>
-            <div className="mt-2 flex flex-wrap gap-2">
-              {profile.analysis?.strongAreas?.slice(0, 3).map((area, i) => (
-                <span
-                  key={i}
-                  className="px-2 py-0.5 text-xs rounded-full bg-emerald-400/20 text-emerald-400 border border-emerald-400/30"
-                >
-                  {area}
-                </span>
-              ))}
+      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
+        <div className="space-y-6">
+          <GlassCard className="overflow-hidden p-0">
+            <div className="border-b border-white/10 bg-gradient-to-r from-violet-400/10 via-accent/5 to-transparent px-5 py-5 sm:px-6">
+              <div className="flex items-center gap-4">
+                <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-violet-400 to-cyan-400 text-lg font-bold text-[#070b12]">
+                  {initials}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-violet-300">
+                    AI-analyzed candidate
+                  </p>
+                  <h2 className="truncate text-lg font-semibold text-white">
+                    {name}
+                  </h2>
+                  <p className="text-xs text-white/50">
+                    {analysis.primaryRole ||
+                      profile?.preferred_role ||
+                      "Candidate"}{" "}
+                    · {experienceLabel}
+                  </p>
+                </div>
+                {analysis.seniorityLevel && (
+                  <span className="hidden rounded-full border border-violet-400/25 bg-violet-400/10 px-3 py-1.5 text-xs font-medium text-violet-200 sm:inline-flex">
+                    {readable(analysis.seniorityLevel)}
+                  </span>
+                )}
+              </div>
             </div>
-          </div>
-          <div className="text-right">
-            <p className="text-2xl font-bold text-accent">
-              {profile.analysis?.seniorityLevel || "Mid"}
+            <div className="px-5 py-5 sm:px-6">
+              <div className="flex flex-wrap gap-2">
+                {skills.slice(0, 5).map((skill, i) => (
+                  <span key={`${skill}-${i}`} className={pillClass}>
+                    {skill}
+                  </span>
+                ))}
+                {skills.length > 5 && (
+                  <span className={pillClass}>+{skills.length - 5} more</span>
+                )}
+                {!skills.length && (
+                  <span className="text-xs text-white/40">
+                    Skills will be based on your analyzed resume.
+                  </span>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowDetails((v) => !v)}
+                className="mt-4 flex items-center gap-2 text-xs font-medium text-accent hover:text-white"
+                aria-expanded={showDetails}
+              >
+                {showDetails
+                  ? "Hide AI profile insights"
+                  : "View AI profile insights"}{" "}
+                <span>{showDetails ? "↑" : "↓"}</span>
+              </button>
+              <AnimatePresence>
+                {showDetails && (
+                  <motion.div
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: "auto", opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    className="overflow-hidden"
+                  >
+                    <div className="mt-5 grid gap-4 border-t border-white/10 pt-5 sm:grid-cols-2">
+                      <InsightList
+                        title="Strengths"
+                        items={strengths}
+                        color="emerald"
+                      />
+                      <InsightList
+                        title="Areas to improve"
+                        items={weaknesses}
+                        color="amber"
+                      />
+                      <div className="sm:col-span-2">
+                        <InsightList
+                          title="Interview focus"
+                          items={focusAreas}
+                          color="cyan"
+                        />
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+          </GlassCard>
+
+          <GlassCard className="p-5 sm:p-7">
+            <div className="mb-6 flex items-start gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-accent/10 text-xl">
+                ◎
+              </div>
+              <div>
+                <h2 className="text-lg font-semibold text-white">
+                  Your target opportunity
+                </h2>
+                <p className="mt-1 text-xs text-white/45">
+                  Questions will be aligned with the role you're preparing for.
+                </p>
+              </div>
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <label className="block">
+                <span className="mb-2 block text-xs font-semibold text-white/70">
+                  Target company <span className="text-accent">*</span>
+                </span>
+                <input
+                  type="text"
+                  autoComplete="organization"
+                  value={config.company}
+                  onChange={(e) => onConfigChange("company", e.target.value)}
+                  placeholder="e.g. Google, Microsoft"
+                  maxLength={120}
+                  className={fieldClass}
+                />
+              </label>
+              <label className="block">
+                <span className="mb-2 block text-xs font-semibold text-white/70">
+                  Target role <span className="text-accent">*</span>
+                </span>
+                <input
+                  type="text"
+                  value={config.role}
+                  onChange={(e) => onConfigChange("role", e.target.value)}
+                  placeholder="e.g. Software Engineer Intern"
+                  maxLength={120}
+                  className={fieldClass}
+                />
+              </label>
+            </div>
+            <p className="mt-4 text-xs text-white/35">
+              Tip: Choose a role matching your current experience for more
+              relevant practice.
             </p>
-            <p className="text-xs text-white/50">Seniority Level</p>
-          </div>
-        </div>
-      </GlassCard>
+          </GlassCard>
 
-      {/* Company & Role */}
-      <GlassCard className="p-6">
-        <h3 className="mb-4 text-sm font-semibold uppercase tracking-widest text-white/40">
-          Company & Role
-        </h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div>
-            <label className="block text-xs font-medium uppercase tracking-wider text-white/40 mb-1">
-              Target Company
-            </label>
-            <input
-              type="text"
-              value={config.company}
-              onChange={(e) => onConfigChange("company", e.target.value)}
-              placeholder="e.g., Google, Microsoft, Stripe"
-              className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white placeholder-white/30 focus:border-accent/50 focus:outline-none"
-            />
-          </div>
-          <div>
-            <label className="block text-xs font-medium uppercase tracking-wider text-white/40 mb-1">
-              Target Role
-            </label>
-            <input
-              type="text"
-              value={config.role}
-              onChange={(e) => onConfigChange("role", e.target.value)}
-              placeholder="e.g., Senior Backend Engineer"
-              className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white placeholder-white/30 focus:border-accent/50 focus:outline-none"
-            />
-          </div>
+          <GlassCard className="p-5 sm:p-7">
+            <div className="mb-6 flex items-start gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-violet-400/10 text-xl text-violet-300">
+                ⚙
+              </div>
+              <div>
+                <h2 className="text-lg font-semibold text-white">
+                  Interview preferences
+                </h2>
+                <p className="mt-1 text-xs text-white/45">
+                  Choose how challenging and focused your session should be.
+                </p>
+              </div>
+            </div>
+            <div className="space-y-6">
+              <div>
+                <p className="mb-3 text-xs font-semibold text-white/70">
+                  Difficulty
+                </p>
+                <div className="grid gap-2 sm:grid-cols-3">
+                  {difficulties.map((item) => {
+                    const selected =
+                      String(config.difficulty) === String(item.value);
+                    return (
+                      <button
+                        type="button"
+                        key={item.value}
+                        onClick={() => onConfigChange("difficulty", item.value)}
+                        aria-pressed={selected}
+                        className={`rounded-xl border p-3 text-left transition-all ${selected ? "border-accent/70 bg-accent/10 shadow-[0_0_20px_rgba(0,242,255,0.06)]" : "border-white/10 bg-white/[0.025] hover:border-white/25"}`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span
+                            className={`text-sm font-semibold ${selected ? "text-accent" : "text-white/75"}`}
+                          >
+                            {item.label}
+                          </span>
+                          <span
+                            className={`h-3.5 w-3.5 rounded-full border ${selected ? "border-accent bg-accent" : "border-white/30"}`}
+                          />
+                        </div>
+                        <p className="mt-2 text-[11px] leading-4 text-white/40">
+                          {item.description || ""}
+                        </p>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              <div>
+                <p className="mb-3 text-xs font-semibold text-white/70">
+                  Interview type
+                </p>
+                <div className="grid gap-2 sm:grid-cols-3">
+                  {types.map((item) => {
+                    const selected = String(config.type) === String(item.value);
+                    return (
+                      <button
+                        type="button"
+                        key={item.value}
+                        onClick={() => onConfigChange("type", item.value)}
+                        aria-pressed={selected}
+                        className={`rounded-xl border p-3 text-left transition-all ${selected ? "border-violet-400/60 bg-violet-400/10" : "border-white/10 bg-white/[0.025] hover:border-white/25"}`}
+                      >
+                        <p
+                          className={`text-sm font-semibold ${selected ? "text-violet-200" : "text-white/75"}`}
+                        >
+                          {item.label}
+                        </p>
+                        <p className="mt-2 text-[11px] leading-4 text-white/40">
+                          {item.description || "Practice this interview format"}
+                        </p>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              <div>
+                <p className="mb-3 text-xs font-semibold text-white/70">
+                  Session duration
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {durations.map((item) => {
+                    const selected =
+                      Number(config.durationMinutes) === Number(item.value);
+                    return (
+                      <button
+                        type="button"
+                        key={item.value}
+                        onClick={() =>
+                          onConfigChange("durationMinutes", Number(item.value))
+                        }
+                        aria-pressed={selected}
+                        className={`min-w-[78px] rounded-xl border px-4 py-3 text-sm font-semibold transition-all ${selected ? "border-accent/70 bg-accent/10 text-accent" : "border-white/10 bg-white/[0.025] text-white/60 hover:border-white/25"}`}
+                      >
+                        {item.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          </GlassCard>
         </div>
-      </GlassCard>
 
-      {/* Interview Configuration */}
-      <GlassCard className="p-6">
-        <h3 className="mb-4 text-sm font-semibold uppercase tracking-widest text-white/40">
-          Interview Configuration
-        </h3>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          {/* Difficulty */}
-          <div>
-            <label className="block text-xs font-medium uppercase tracking-wider text-white/40 mb-1">
-              Difficulty
-            </label>
-            <select
-              value={config.difficulty}
-              onChange={(e) => onConfigChange("difficulty", e.target.value)}
-              className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white focus:border-accent/50 focus:outline-none appearance-none"
+        <div className="space-y-6 lg:sticky lg:top-28 lg:self-start">
+          <GlassCard className="overflow-hidden p-0" glow="#00F2FF">
+            <div className="border-b border-white/10 bg-gradient-to-br from-accent/10 to-transparent px-5 py-5">
+              <div className="flex items-center justify-between">
+                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">
+                  Session preview
+                </p>
+                <span className="rounded-full bg-emerald-400/10 px-2.5 py-1 text-[10px] text-emerald-300">
+                  AI tailored
+                </span>
+              </div>
+              <h3 className="mt-3 break-words text-xl font-bold text-white">
+                {config.role.trim() || "Your target role"}
+              </h3>
+              <p className="mt-1 break-words text-sm text-white/50">
+                {config.company.trim() || "Choose a company"}
+              </p>
+            </div>
+            <div className="space-y-4 p-5">
+              <SummaryRow
+                label="Difficulty"
+                value={selectedDifficulty?.label || readable(config.difficulty)}
+              />
+              <SummaryRow
+                label="Interview type"
+                value={selectedType?.label || readable(config.type)}
+              />
+              <SummaryRow
+                label="Duration"
+                value={`${config.durationMinutes} minutes`}
+              />
+              <SummaryRow label="Candidate" value={name} />
+              <div className="rounded-xl border border-accent/15 bg-accent/[0.04] p-3">
+                <p className="text-xs font-medium text-white/75">
+                  Resume-aware questions
+                </p>
+                <p className="mt-1 text-xs leading-5 text-white/45">
+                  Your saved skills, projects and profile insights help shape
+                  the interview.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setReviewOpen((v) => !v)}
+                className="w-full rounded-xl border border-white/10 bg-white/[0.035] px-3 py-2.5 text-xs font-medium text-white/65 hover:border-accent/30"
+                aria-expanded={reviewOpen}
+              >
+                {reviewOpen ? "Hide full context ↑" : "View full AI context ↓"}
+              </button>
+              {reviewOpen && (
+                <div className="space-y-3 border-t border-white/10 pt-4">
+                  <SummaryRow label="Experience" value={experienceLabel} />
+                  <SummaryRow
+                    label="Seniority"
+                    value={readable(analysis.seniorityLevel || "Not specified")}
+                  />
+                  <div>
+                    <p className="text-xs text-white/40">Focus areas</p>
+                    <p className="mt-1 break-words text-xs leading-5 text-white/70">
+                      {focusAreas.slice(0, 4).join(" · ") ||
+                        "Based on your resume"}
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
+          </GlassCard>
+          <div className="rounded-2xl border border-white/10 bg-[#10141e]/90 p-5">
+            <p className="text-sm font-semibold text-white">
+              Ready when you are
+            </p>
+            <p className="mt-2 text-xs leading-5 text-white/45">
+              Your session will be created with these settings. You'll review
+              the interview page before requesting your first question.
+            </p>
+            {!ready && (
+              <p className="mt-3 text-xs text-amber-300">
+                Enter a company and role to continue.
+              </p>
+            )}
+            <Button
+              className="mt-5 w-full"
+              size="lg"
+              onClick={onCreateSession}
+              disabled={!ready || creatingSession}
             >
-              {wizardOptions?.difficulties?.map((d) => (
-                <option key={d.value} value={d.value}>
-                  {d.label}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {/* Type */}
-          <div>
-            <label className="block text-xs font-medium uppercase tracking-wider text-white/40 mb-1">
-              Interview Type
-            </label>
-            <select
-              value={config.type}
-              onChange={(e) => onConfigChange("type", e.target.value)}
-              className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white focus:border-accent/50 focus:outline-none appearance-none"
+              {creatingSession
+                ? "Creating session..."
+                : "Create Interview Session →"}
+            </Button>
+            <button
+              type="button"
+              onClick={onBack}
+              disabled={creatingSession}
+              className="mt-3 w-full rounded-xl py-2.5 text-sm text-white/50 transition hover:bg-white/5 hover:text-white disabled:opacity-40"
             >
-              {wizardOptions?.types?.map((t) => (
-                <option key={t.value} value={t.value}>
-                  {t.label}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {/* Duration */}
-          <div>
-            <label className="block text-xs font-medium uppercase tracking-wider text-white/40 mb-1">
-              Duration
-            </label>
-            <select
-              value={config.durationMinutes}
-              onChange={(e) =>
-                onConfigChange("durationMinutes", parseInt(e.target.value))
-              }
-              className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white focus:border-accent/50 focus:outline-none appearance-none"
-            >
-              {wizardOptions?.durations?.map((d) => (
-                <option key={d.value} value={d.value}>
-                  {d.label}
-                </option>
-              ))}
-            </select>
+              ← Back to profile
+            </button>
           </div>
         </div>
-
-        {/* Difficulty Description */}
-        {wizardOptions?.difficulties && (
-          <p className="mt-4 text-sm text-white/50">
-            {
-              wizardOptions.difficulties.find(
-                (d) => d.value === config.difficulty,
-              )?.description
-            }
-          </p>
-        )}
-      </GlassCard>
-
-      {/* AI Context Preview */}
-      <GlassCard className="p-6" glow="#00F2FF">
-        <h3 className="mb-4 text-sm font-semibold uppercase tracking-widest text-white/40">
-          Interview Context Preview
-        </h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div className="space-y-3">
-            <ContextRow
-              label="Candidate"
-              value={`${profile.analysis?.seniorityLevel || "Mid"} ${profile.analysis?.primaryRole || "Engineer"}`}
-            />
-            <ContextRow
-              label="Experience"
-              value={`${profile.analysis?.totalYearsExperience || 0} years`}
-            />
-            <ContextRow
-              label="Top Skills"
-              value={profile.skills?.technical?.slice(0, 5).join(", ") || "—"}
-            />
-            <ContextRow
-              label="Strong Areas"
-              value={
-                profile.analysis?.strongAreas?.slice(0, 3).join(", ") || "—"
-              }
-            />
-            <ContextRow
-              label="Weak Areas"
-              value={profile.analysis?.weakAreas?.slice(0, 3).join(", ") || "—"}
-            />
-            <ContextRow
-              label="Focus Areas"
-              value={
-                profile.analysis?.interviewFocusAreas?.slice(0, 3).join(", ") ||
-                "—"
-              }
-            />
-          </div>
-          <div className="space-y-3">
-            <ContextRow label="Company" value={config.company || "Not set"} />
-            <ContextRow label="Role" value={config.role || "Not set"} />
-            <ContextRow label="Difficulty" value={config.difficulty} />
-            <ContextRow label="Type" value={config.type.replace("_", " ")} />
-            <ContextRow
-              label="Duration"
-              value={`${config.durationMinutes} minutes`}
-            />
-            <ContextRow
-              label="Est. Questions"
-              value={Math.ceil(config.durationMinutes / 5)}
-            />
-          </div>
-        </div>
-      </GlassCard>
-
-      {/* Create Session */}
-      <div className="flex justify-end">
-        <Button
-          onClick={onCreateSession}
-          disabled={creatingSession || !config.company || !config.role}
-          size="lg"
-        >
-          {creatingSession ? "Creating Session..." : "Create Interview Session"}
-        </Button>
       </div>
     </div>
   );
 }
 
-function ContextRow({ label, value }) {
+function SummaryRow({ label, value }) {
   return (
-    <div className="flex items-center justify-between py-2 border-b border-white/5 last:border-0">
-      <span className="text-sm text-white/50">{label}</span>
-      <span className="text-sm font-medium text-white truncate max-w-[60%] text-right">
+    <div className="flex items-start justify-between gap-3 border-b border-white/5 pb-3 last:border-0 last:pb-0">
+      <span className="shrink-0 text-xs text-white/40">{label}</span>
+      <span className="min-w-0 break-words text-right text-xs font-medium text-white/80">
         {value}
       </span>
+    </div>
+  );
+}
+function InsightList({ title, items, color }) {
+  const colorClass =
+    color === "emerald"
+      ? "text-emerald-300"
+      : color === "amber"
+        ? "text-amber-300"
+        : "text-cyan-300";
+  return (
+    <div>
+      <p className={`mb-2 text-xs font-semibold ${colorClass}`}>{title}</p>
+      {items.length ? (
+        <ul className="space-y-2">
+          {items.slice(0, 4).map((item, index) => (
+            <li
+              key={index}
+              className="flex gap-2 text-xs leading-5 text-white/55"
+            >
+              <span className={colorClass}>•</span>
+              <span>
+                {typeof item === "string"
+                  ? item
+                  : item?.description ||
+                    item?.skill ||
+                    item?.topic ||
+                    JSON.stringify(item)}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="text-xs text-white/35">No specific insights available.</p>
+      )}
     </div>
   );
 }

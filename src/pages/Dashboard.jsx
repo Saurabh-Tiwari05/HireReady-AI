@@ -1,49 +1,35 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 import Navbar from "../components/ui/Navbar";
 import PageTransition from "../components/ui/PageTransition";
-import SectionTitle from "../components/ui/SectionTitle";
 import GlassCard from "../components/ui/GlassCard";
-import Button from "../components/ui/Button";
-import { Gauge, ProgressBar, AnimatedBar } from "../sections/Dashboard";
 
 const BASE = import.meta.env.VITE_API_URL || "/api";
-
-const STAGE_LABELS = {
-  screening: "Screening",
-  technical: "Technical",
-  system_design: "System Design",
-  behavioral: "Behavioral",
-  final: "Final Round",
-  offer: "Offer",
-  rejected: "Rejected",
+const statusStyles = {
+  scheduled: "text-amber-300 bg-amber-400/10 border-amber-400/20",
+  in_progress: "text-cyan-300 bg-cyan-400/10 border-cyan-400/20",
+  completed: "text-emerald-300 bg-emerald-400/10 border-emerald-400/20",
+  cancelled: "text-red-300 bg-red-400/10 border-red-400/20",
+  rescheduled: "text-violet-300 bg-violet-400/10 border-violet-400/20",
 };
-
-const STATUS_LABELS = {
+const statusNames = {
+  in_progress: "In progress",
   scheduled: "Scheduled",
-  in_progress: "In Progress",
   completed: "Completed",
   cancelled: "Cancelled",
   rescheduled: "Rescheduled",
 };
-
-const STATUS_COLORS = {
-  scheduled: "text-amber-400 bg-amber-400/10 border-amber-400/20",
-  in_progress: "text-accent bg-accent/10 border-accent/20",
-  completed: "text-emerald-400 bg-emerald-400/10 border-emerald-400/20",
-  cancelled: "text-red-400 bg-red-400/10 border-red-400/20",
-  rescheduled: "text-violet-400 bg-violet-400/10 border-violet-400/20",
+const stageNames = {
+  screening: "Screening",
+  technical: "Technical",
+  system_design: "System design",
+  behavioral: "Behavioral",
+  final: "Final round",
+  offer: "Offer",
+  rejected: "Rejected",
 };
-
-const PRIORITY_COLORS = {
-  low: "text-gray-400",
-  medium: "text-amber-400",
-  high: "text-orange-400",
-  urgent: "text-red-400",
-};
-
-const TYPE_ICONS = {
+const notificationIcons = {
   interview_scheduled: "📅",
   interview_reminder: "⏰",
   interview_completed: "✅",
@@ -53,453 +39,874 @@ const TYPE_ICONS = {
   system_announcement: "📢",
   achievement_unlocked: "🏆",
 };
+const panel = "rounded-2xl border border-white/10 bg-white/[0.035]";
+const dateFmt = (
+  value,
+  options = { month: "short", day: "numeric", year: "numeric" },
+) => {
+  if (!value) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? "—"
+    : date.toLocaleDateString(undefined, options);
+};
+const number = (value) => (Number.isFinite(Number(value)) ? Number(value) : 0);
+const clamp = (value) => Math.min(100, Math.max(0, number(value)));
+const displayScore = (value) =>
+  value == null || value === "" ? "—" : `${Math.round(number(value))}`;
+const list = (value) => (Array.isArray(value) ? value : []);
+const label = (value) => String(value || "Unknown").replaceAll("_", " ");
+
+async function api(path, options = {}, signal) {
+  const token = localStorage.getItem("hr_token");
+  if (!token) throw new Error("Please log in to view your dashboard.");
+  const response = await fetch(`${BASE}${path}`, {
+    ...options,
+    signal,
+    headers: { Authorization: `Bearer ${token}`, ...options.headers },
+  });
+  if (!response.ok) {
+    if (response.status === 401)
+      throw new Error("Your session has expired. Please log in again.");
+    const text = await response.text();
+    throw new Error(
+      text.slice(0, 180) || `Request failed (${response.status})`,
+    );
+  }
+  if (response.status === 204) return null;
+  const text = await response.text();
+  return text ? JSON.parse(text) : null;
+}
 
 export default function Dashboard() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [tab, setTab] = useState("overview");
+  const [notificationFilter, setNotificationFilter] = useState("all");
+  const [search, setSearch] = useState("");
+  const [busyNotifications, setBusyNotifications] = useState([]);
 
-  useEffect(() => {
-    const fetchDashboard = async () => {
-      try {
-        const token = localStorage.getItem("hr_token");
-        if (!token) {
-          throw new Error("Not authenticated");
-        }
-
-        const res = await fetch(`${BASE}/dashboard`, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        });
-
-        if (!res.ok) {
-          if (res.status === 401) {
-            throw new Error("Session expired. Please log in again.");
-          }
-          throw new Error(await res.text());
-        }
-
-        const json = await res.json();
-        setData(json.data);
-      } catch (e) {
-        setError(e.message);
-      } finally {
+  const loadDashboard = useCallback(async (signal, quiet = false) => {
+    if (quiet) setRefreshing(true);
+    else setLoading(true);
+    setError("");
+    try {
+      const result = await api("/dashboard", {}, signal);
+      if (signal?.aborted) return;
+      if (!result?.data) throw new Error("Dashboard data is unavailable.");
+      setData(result.data);
+    } catch (err) {
+      if (err.name !== "AbortError" && !signal?.aborted) setError(err.message);
+    } finally {
+      if (!signal?.aborted) {
         setLoading(false);
+        setRefreshing(false);
       }
-    };
-
-    fetchDashboard();
+    }
   }, []);
 
-  const handleMarkNotificationRead = async (notificationId) => {
+  useEffect(() => {
+    const controller = new AbortController();
+    loadDashboard(controller.signal);
+    return () => controller.abort();
+  }, [loadDashboard]);
+
+  useEffect(() => {
+    if (!notice) return;
+    const timer = setTimeout(() => setNotice(""), 4500);
+    return () => clearTimeout(timer);
+  }, [notice]);
+
+  const updateNotification = async (path, updater, ids = []) => {
+    if (ids.some((id) => busyNotifications.includes(id))) return;
+    setBusyNotifications((prev) => [...prev, ...ids]);
     try {
-      const token = localStorage.getItem("hr_token");
-      await fetch(`${BASE}/dashboard/notifications/${notificationId}/read`, {
-        method: "PUT",
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      setData((prev) => ({
-        ...prev,
-        latestNotifications: prev.latestNotifications.map((n) =>
-          n.id === notificationId ? { ...n, is_read: true } : n
-        ),
-        stats: { ...prev.stats, unreadNotifications: Math.max(0, prev.stats.unreadNotifications - 1) },
-      }));
-    } catch (e) {
-      console.error("Failed to mark notification read:", e);
+      await api(path, { method: "PUT" });
+      setData((prev) => (prev ? updater(prev) : prev));
+    } catch (err) {
+      setNotice(`Couldn't update notifications: ${err.message}`);
+    } finally {
+      setBusyNotifications((prev) => prev.filter((id) => !ids.includes(id)));
     }
   };
 
-  const handleMarkAllRead = async () => {
-    try {
-      const token = localStorage.getItem("hr_token");
-      await fetch(`${BASE}/dashboard/notifications/read-all`, {
-        method: "PUT",
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      setData((prev) => ({
+  const markRead = (id) =>
+    updateNotification(
+      `/dashboard/notifications/${encodeURIComponent(id)}/read`,
+      (prev) => {
+        const notifications = list(prev.latestNotifications);
+        const unread = notifications.some(
+          (n) => String(n.id) === String(id) && !n.is_read,
+        );
+        return {
+          ...prev,
+          latestNotifications: notifications.map((n) =>
+            String(n.id) === String(id) ? { ...n, is_read: true } : n,
+          ),
+          stats: {
+            ...prev.stats,
+            unreadNotifications: Math.max(
+              0,
+              number(prev.stats?.unreadNotifications) - (unread ? 1 : 0),
+            ),
+          },
+        };
+      },
+      [id],
+    );
+
+  const archive = (id) =>
+    updateNotification(
+      `/dashboard/notifications/${encodeURIComponent(id)}/archive`,
+      (prev) => {
+        const notifications = list(prev.latestNotifications);
+        const target = notifications.find((n) => String(n.id) === String(id));
+        return {
+          ...prev,
+          latestNotifications: notifications.filter(
+            (n) => String(n.id) !== String(id),
+          ),
+          stats: {
+            ...prev.stats,
+            unreadNotifications: Math.max(
+              0,
+              number(prev.stats?.unreadNotifications) -
+                (target && !target.is_read ? 1 : 0),
+            ),
+          },
+        };
+      },
+      [id],
+    );
+
+  const markAllRead = () =>
+    updateNotification(
+      "/dashboard/notifications/read-all",
+      (prev) => ({
         ...prev,
-        latestNotifications: prev.latestNotifications.map((n) => ({ ...n, is_read: true })),
+        latestNotifications: list(prev.latestNotifications).map((n) => ({
+          ...n,
+          is_read: true,
+        })),
         stats: { ...prev.stats, unreadNotifications: 0 },
-      }));
-    } catch (e) {
-      console.error("Failed to mark all read:", e);
-    }
-  };
+      }),
+      ["all"],
+    );
 
-  const handleArchiveNotification = async (notificationId) => {
+  const user = data?.user || {};
+  const stats = data?.stats || {};
+  const resume = data?.currentResume || null;
+  const reports = list(data?.recentReports);
+  const notifications = list(data?.latestNotifications);
+  const timeline = list(data?.timeline);
+  const latest = data?.latestInterview || null;
+  const skills =
+    data?.skillBreakdown &&
+    typeof data.skillBreakdown === "object" &&
+    !Array.isArray(data.skillBreakdown)
+      ? Object.entries(data.skillBreakdown).filter(([, value]) =>
+          Number.isFinite(Number(value)),
+        )
+      : [];
+  const profileItems = [
+    user.full_name,
+    user.college,
+    user.branch,
+    user.graduation_year,
+    user.preferred_role,
+    resume,
+  ];
+  const profilePercent = Math.round(
+    (profileItems.filter(Boolean).length / profileItems.length) * 100,
+  );
+  const completed = number(stats.completedInterviews);
+  const total = number(stats.totalInterviews);
+  const avgScore =
+    stats.averageScore == null ? null : number(stats.averageScore);
+  const completedRate = total > 0 ? Math.round((completed / total) * 100) : 0;
+  const firstName = user.full_name?.trim().split(/\s+/)[0] || "there";
+  const greeting =
+    new Date().getHours() < 12
+      ? "Good morning"
+      : new Date().getHours() < 17
+        ? "Good afternoon"
+        : "Good evening";
+
+  const filteredNotifications = useMemo(
+    () =>
+      notifications.filter((n) => {
+        const matchesFilter =
+          notificationFilter === "all" ||
+          (notificationFilter === "unread" ? !n.is_read : !!n.is_read);
+        const matchesSearch = `${n.title || ""} ${n.message || ""}`
+          .toLowerCase()
+          .includes(search.toLowerCase());
+        return matchesFilter && matchesSearch;
+      }),
+    [notifications, notificationFilter, search],
+  );
+
+  const filteredTimeline = useMemo(
+    () =>
+      timeline.filter((item) =>
+        `${item.company || ""} ${item.role || ""} ${item.status || ""} ${item.stage || ""}`
+          .toLowerCase()
+          .includes(search.toLowerCase()),
+      ),
+    [timeline, search],
+  );
+
+  const openResume = () => {
+    if (!resume?.file_url)
+      return setNotice(
+        "A viewable resume URL isn't available. Open Resume Management instead.",
+      );
     try {
-      const token = localStorage.getItem("hr_token");
-      await fetch(`${BASE}/dashboard/notifications/${notificationId}/archive`, {
-        method: "PUT",
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      setData((prev) => ({
-        ...prev,
-        latestNotifications: prev.latestNotifications.filter((n) => n.id !== notificationId),
-      }));
-    } catch (e) {
-      console.error("Failed to archive notification:", e);
+      const url = new URL(resume.file_url, window.location.origin);
+      if (!["https:", "http:"].includes(url.protocol))
+        throw new Error("Invalid file URL");
+      window.open(url.href, "_blank", "noopener,noreferrer");
+    } catch {
+      setNotice("Unable to open this resume file.");
     }
   };
-
-  if (loading) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-bg">
-        <div className="h-10 w-10 animate-spin rounded-full border-2 border-accent border-t-transparent" />
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <>
-        <Navbar />
-        <PageTransition>
-          <main id="main" className="relative overflow-hidden bg-bg">
-            <div className="section mx-auto max-w-5xl px-6 pt-20">
-              <GlassCard className="p-8 text-center">
-                <p className="text-red-400 mb-4">{error}</p>
-                <Button onClick={() => window.location.reload()}>Retry</Button>
-              </GlassCard>
-            </div>
-          </main>
-        </PageTransition>
-      </>
-    );
-  }
-
-  const { user, currentResume, stats, latestInterview, recentReports, latestNotifications, skillBreakdown, timeline, quickActions } = data;
 
   return (
     <>
       <Navbar />
       <PageTransition>
-        <main id="main" className="relative overflow-hidden bg-bg">
-          <div className="section mx-auto max-w-6xl px-6">
-            {/* Welcome Banner */}
-            <GlassCard className="relative overflow-hidden p-6 glow" glow="#00F2FF" strong>
-              <div className="absolute inset-0 bg-gradient-to-r from-accent/10 via-transparent to-cyan-400/10" />
-              <div className="relative z-10 flex flex-col md:flex-row md:items-center md:justify-between gap-6">
-                <div>
-                  <p className="text-sm font-semibold uppercase tracking-widest text-accent">Welcome back</p>
-                  <h1 className="mt-1 display-title text-3xl text-white md:text-4xl">
-                    Hello, <span className="text-gradient-cyan">{user?.full_name?.split(" ")[0] || "User"}</span>
-                  </h1>
-                  <p className="mt-2 text-sm text-white/60">
-                    {user?.preferred_role ? `${user.preferred_role} · ` : ""}
-                    {user?.college ? `${user.college}` : "Ready to ace your interviews"}
-                  </p>
-                </div>
-                <div className="flex items-center gap-3">
-                  <div className="relative flex h-16 w-16 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-accent to-cyan-400 text-xl font-black text-bg shadow-[0_0_40px_rgba(0,242,255,0.35)]">
-                    {user?.profile_picture_url ? (
-                      <img src={user.profile_picture_url} alt={user.full_name} className="h-full w-full rounded-full object-cover" />
-                    ) : (
-                      user?.full_name?.split(" ").map((n) => n[0]).join("").slice(0, 2).toUpperCase()
-                    )}
-                  </div>
-                  <div className="text-right hidden sm:block">
-                    <p className="text-xs uppercase tracking-widest text-white/40">Overall Score</p>
-                    <p className="text-3xl font-bold text-white">{stats.averageScore || "—"}</p>
-                  </div>
-                </div>
+        <main
+          id="main"
+          className="relative min-h-screen overflow-hidden bg-bg pb-24 pt-28 text-white"
+        >
+          <div className="pointer-events-none absolute -left-52 top-24 h-[500px] w-[500px] rounded-full bg-accent/[0.045] blur-[110px]" />
+          <div className="pointer-events-none absolute -right-44 top-[500px] h-[500px] w-[500px] rounded-full bg-violet-500/[0.06] blur-[110px]" />
+          <div className="relative mx-auto max-w-7xl px-5 sm:px-8 lg:px-10">
+            {notice && (
+              <div
+                role="status"
+                className="mb-5 flex items-center justify-between gap-4 rounded-xl border border-amber-400/30 bg-amber-400/10 px-4 py-3 text-sm text-amber-100"
+              >
+                <span>{notice}</span>
+                <button
+                  type="button"
+                  onClick={() => setNotice("")}
+                  aria-label="Dismiss notification"
+                >
+                  ✕
+                </button>
               </div>
-            </GlassCard>
-
-            {/* Stats Grid */}
-            <div className="mt-8 grid grid-cols-2 gap-4 md:grid-cols-4">
-              <StatCard label="Total Interviews" value={stats.totalInterviews} icon="🎯" color="#60A5FA" />
-              <StatCard label="Completed" value={stats.completedInterviews} icon="✅" color="#34D399" />
-              <StatCard label="Upcoming" value={stats.upcomingInterviews} icon="📅" color="#FBBF24" />
-              <StatCard
-                label="Notifications"
-                value={stats.unreadNotifications}
-                icon="🔔"
-                color={stats.unreadNotifications > 0 ? "#F472B6" : "#6B7280"}
-                highlight={stats.unreadNotifications > 0}
-              />
-            </div>
-
-            {/* Main Content Grid */}
-            <div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-3">
-              {/* Left Column - Profile Summary & Current Resume */}
-              <div className="lg:col-span-1 space-y-6">
-                {/* Profile Summary */}
-                <GlassCard className="p-6">
-                  <h3 className="mb-4 text-sm font-semibold uppercase tracking-widest text-white/40">Profile Summary</h3>
-                  <div className="space-y-4">
-                    <ProfileRow label="Email" value={user?.email} />
-                    <ProfileRow label="College" value={user?.college || "Not set"} />
-                    <ProfileRow label="Branch" value={user?.branch || "Not set"} />
-                    <ProfileRow label="Graduation" value={user?.graduation_year || "Not set"} />
-                    <ProfileRow label="Preferred Role" value={user?.preferred_role || "Not set"} />
+            )}
+            {loading ? (
+              <LoadingDashboard />
+            ) : error && !data ? (
+              <GlassCard className="p-10 text-center">
+                <div className="text-4xl">⚠️</div>
+                <h1 className="mt-3 text-xl font-semibold">
+                  Couldn't load your dashboard
+                </h1>
+                <p className="mt-2 text-sm text-red-300">{error}</p>
+                <div className="mt-6 flex justify-center gap-3">
+                  <button
+                    className="btn-neon px-5 py-2 text-sm"
+                    onClick={() => loadDashboard()}
+                  >
+                    Try again
+                  </button>
+                  <Link className="btn-ghost px-5 py-2 text-sm" to="/login">
+                    Login
+                  </Link>
+                </div>
+              </GlassCard>
+            ) : data ? (
+              <>
+                <header className="mb-7 flex flex-wrap items-start justify-between gap-4">
+                  <div>
+                    <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.2em] text-accent">
+                      <span className="h-2 w-2 animate-pulse rounded-full bg-accent" />
+                      Your preparation workspace
+                    </div>
+                    <h1 className="font-display text-3xl font-bold tracking-tight sm:text-4xl">
+                      {greeting},{" "}
+                      <span className="text-gradient-cyan">{firstName}</span> 👋
+                    </h1>
+                    <p className="mt-2 text-sm text-white/50">
+                      Track progress, discover weak spots, and prepare for your
+                      next interview.
+                    </p>
                   </div>
-
-                  {user?.skills?.length > 0 && (
-                    <div className="mt-6">
-                      <p className="mb-3 text-xs font-semibold uppercase tracking-widest text-white/40">Skills</p>
-                      <div className="flex flex-wrap gap-2">
-                        {user.skills.slice(0, 6).map((s) => (
-                          <span key={s} className="rounded-full border border-accent/30 bg-accent/10 px-3 py-1 text-xs text-accent">
-                            {s}
-                          </span>
-                        ))}
-                        {user.skills.length > 6 && (
-                          <span className="rounded-full border border-white/20 bg-white/5 px-3 py-1 text-xs text-white/60">
-                            +{user.skills.length - 6} more
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  )}
-
-                  {user?.target_companies?.length > 0 && (
-                    <div className="mt-6">
-                      <p className="mb-3 text-xs font-semibold uppercase tracking-widest text-white/40">Target Companies</p>
-                      <div className="flex flex-wrap gap-2">
-                        {user.target_companies.slice(0, 4).map((c) => (
-                          <span key={c} className="rounded-full border border-[#a78bfa]/30 bg-[#a78bfa]/10 px-3 py-1 text-xs text-[#a78bfa]">
-                            {c}
-                          </span>
-                        ))}
-                        {user.target_companies.length > 4 && (
-                          <span className="rounded-full border border-white/20 bg-white/5 px-3 py-1 text-xs text-white/60">
-                            +{user.target_companies.length - 4} more
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  )}
-
-                  <div className="mt-6 pt-4 border-t border-white/10">
-                    <Link to="/profile" className="btn-ghost w-full text-sm">
-                      Edit Profile
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => loadDashboard(undefined, true)}
+                      disabled={refreshing}
+                      className="rounded-xl border border-white/15 bg-white/5 px-4 py-2.5 text-sm text-white/80 transition hover:bg-white/10 disabled:opacity-50"
+                    >
+                      {refreshing ? "Refreshing…" : "↻ Refresh"}
+                    </button>
+                    <Link
+                      to="/interview"
+                      className="btn-neon inline-flex items-center px-5 py-2.5 text-sm"
+                    >
+                      ✦ Start mock interview
                     </Link>
                   </div>
-                </GlassCard>
+                </header>
+                {error && (
+                  <p
+                    role="alert"
+                    className="mb-5 rounded-xl border border-red-400/20 bg-red-400/10 p-3 text-sm text-red-300"
+                  >
+                    Refresh failed: {error}. Showing previously loaded data.
+                  </p>
+                )}
 
-                {/* Current Resume */}
-                <GlassCard className="p-6" glow={currentResume ? "#34D399" : "#FBBF24"}>
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="flex-1">
-                      <p className="text-sm font-semibold uppercase tracking-widest text-white/40">Current Resume</p>
-                      {currentResume ? (
-                        <>
-                          <h4 className="mt-1 text-lg font-medium text-white">{currentResume.title}</h4>
-                          <p className="mt-1 text-sm text-white/60">
-                            {currentResume.original_filename || "PDF"} · v{currentResume.version} ·{(currentResume.file_size / 1024).toFixed(1)} KB
-                          </p>
-                          <div className="mt-4 flex gap-2">
-                            <Button size="sm" variant="ghost" onClick={() => window.open(currentResume.file_url, "_blank")}>
-                              View
-                            </Button>
-                            <Link to="/profile#resume" className="btn-ghost text-sm">
-                              Replace
-                            </Link>
-                          </div>
-                        </>
-                      ) : (
-                        <>
-                          <p className="mt-1 text-white/60">No resume uploaded yet</p>
-                          <Link to="/profile#resume" className="btn-neon mt-3 inline-block text-sm">
-                            Upload Resume
-                          </Link>
-                        </>
-                      )}
-                    </div>
-                    {currentResume && (
-                      <div className="relative flex h-16 w-12 shrink-0 items-center justify-center rounded-xl bg-gradient-to-b from-white/10 to-white/5 border border-white/10">
-                        <span className="text-3xl">📄</span>
-                      </div>
-                    )}
-                  </div>
-                </GlassCard>
-              </div>
+                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                  <Metric
+                    icon="🎯"
+                    title="Total interviews"
+                    value={total}
+                    detail="Practice sessions"
+                    accent="cyan"
+                  />
+                  <Metric
+                    icon="✅"
+                    title="Completed"
+                    value={completed}
+                    detail={`${completedRate}% completion rate`}
+                    accent="green"
+                  />
+                  <Metric
+                    icon="📈"
+                    title="Average score"
+                    value={
+                      avgScore == null ? "—" : `${Math.round(avgScore)}/100`
+                    }
+                    detail="Across scored interviews"
+                    accent="purple"
+                  />
+                  <Metric
+                    icon="🔔"
+                    title="Unread alerts"
+                    value={number(stats.unreadNotifications)}
+                    detail="Notifications"
+                    accent="pink"
+                  />
+                </div>
 
-              {/* Middle Column - Interview Stats & Latest Interview */}
-              <div className="lg:col-span-1 space-y-6">
-                {/* Skill Breakdown Gauge */}
-                <GlassCard className="p-6">
-                  <div className="flex items-center justify-between mb-6">
-                    <p className="text-sm font-semibold uppercase tracking-widest text-white/40">Skill Breakdown</p>
-                    {skillBreakdown && (
-                      <span className="text-xs text-emerald-400">From latest report</span>
-                    )}
-                  </div>
-
-                  {skillBreakdown ? (
-                    <div className="space-y-4">
-                      {Object.entries(skillBreakdown).map(([key, value], i) => (
-                        <div key={key} className="flex items-center gap-4">
-                          <span className="w-28 text-sm text-gray-300 capitalize">{key.replace("_", " ")}</span>
-                          <ProgressBar value={value} color={getSkillColor(key)} />
-                          <span className="w-8 text-right text-sm font-bold tabular-nums text-white">{value}</span>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="text-center py-8 text-white/40">
-                      <p className="mb-2">No skill data available</p>
-                      <p className="text-sm">Complete an interview to see your breakdown</p>
-                    </div>
-                  )}
-                </GlassCard>
-
-                {/* Latest Interview */}
-                <GlassCard className="p-6">
-                  <h3 className="mb-4 text-sm font-semibold uppercase tracking-widest text-white/40">Latest Interview</h3>
-                  {latestInterview ? (
-                    <div className="space-y-4">
-                      <div className="flex items-start justify-between gap-4">
-                        <div>
-                          <h4 className="text-lg font-medium text-white">{latestInterview.company}</h4>
-                          <p className="text-sm text-white/60">{latestInterview.role}</p>
-                        </div>
-                        <span className={`shrink-0 rounded-full px-3 py-1 text-xs font-medium border ${STATUS_COLORS[latestInterview.status] || "border-white/20 text-white/60"}`}>
-                          {STATUS_LABELS[latestInterview.status] || latestInterview.status}
-                        </span>
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-4 text-sm">
-                        <div>
-                          <p className="text-white/40">Stage</p>
-                          <p className="text-white capitalize">{STAGE_LABELS[latestInterview.stage] || latestInterview.stage}</p>
-                        </div>
-                        <div>
-                          <p className="text-white/40">Scheduled</p>
-                          <p className="text-white">{latestInterview.scheduled_at ? new Date(latestInterview.scheduled_at).toLocaleDateString() : "—"}</p>
-                        </div>
-                        {latestInterview.score !== null && (
-                          <div>
-                            <p className="text-white/40">Score</p>
-                            <p className="text-white font-bold text-accent">{latestInterview.score}/100</p>
-                          </div>
-                        )}
-                        {latestInterview.duration_minutes && (
-                          <div>
-                            <p className="text-white/40">Duration</p>
-                            <p className="text-white">{latestInterview.duration_minutes} min</p>
-                          </div>
-                        )}
-                      </div>
-
-                      {latestInterview.feedback && (
-                        <div className="pt-4 border-t border-white/10">
-                          <p className="text-sm text-white/40">Feedback</p>
-                          <p className="mt-1 text-sm text-white/70 line-clamp-2">{latestInterview.feedback}</p>
-                        </div>
-                      )}
-
-                      <div className="pt-4 border-t border-white/10 flex gap-2">
-                        <Button size="sm" variant="ghost" onClick={() => latestInterview.meeting_link && window.open(latestInterview.meeting_link, "_blank")} disabled={!latestInterview.meeting_link}>
-                          Join Meeting
-                        </Button>
-                        <Link to={`/interviews/${latestInterview.id}`} className="btn-ghost text-sm flex-1 text-center">
-                          View Details
+                <div className="mt-6 grid gap-5 lg:grid-cols-[1.7fr_1fr]">
+                  <GlassCard
+                    className="relative overflow-hidden p-6 sm:p-7"
+                    strong
+                    glow="#00F2FF"
+                  >
+                    <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-accent/[0.07] via-transparent to-violet-400/[0.07]" />
+                    <div className="relative flex flex-wrap items-center justify-between gap-5">
+                      <div className="min-w-0 flex-1">
+                        <p className="text-xs font-semibold uppercase tracking-[0.2em] text-accent">
+                          Your next step
+                        </p>
+                        <h2 className="mt-2 text-xl font-semibold sm:text-2xl">
+                          {!resume
+                            ? "Add your resume to get started"
+                            : completed === 0
+                              ? "Your first interview starts here"
+                              : "Keep your momentum going"}
+                        </h2>
+                        <p className="mt-2 max-w-xl text-sm leading-relaxed text-white/60">
+                          {!resume
+                            ? "Upload a resume so HireReady can tailor questions to your background."
+                            : completed === 0
+                              ? "Your resume is ready. Practice with resume-aware AI questions and get actionable feedback."
+                              : "Practice regularly and use your reports to strengthen the skills that matter most."}
+                        </p>
+                        <Link
+                          to={!resume ? "/resume" : "/interview"}
+                          className="btn-neon mt-5 inline-flex px-5 py-2.5 text-sm"
+                        >
+                          {!resume ? "Manage resume →" : "Practice now →"}
                         </Link>
                       </div>
-                    </div>
-                  ) : (
-                    <div className="text-center py-8 text-white/40">
-                      <p className="mb-2">No interviews yet</p>
-                      <Link to="/interviews/new" className="btn-neon inline-block text-sm">
-                        Schedule Interview
-                      </Link>
-                    </div>
-                  )}
-                </GlassCard>
-
-                {/* Interview Timeline */}
-                <GlassCard className="p-6">
-                  <h3 className="mb-4 text-sm font-semibold uppercase tracking-widest text-white/40">Interview Timeline</h3>
-                  {timeline.length > 0 ? (
-                    <div className="relative flex flex-col gap-5 pl-6">
-                      <div className="absolute left-[7px] top-2 bottom-2 w-px bg-gradient-to-b from-accent via-white/10 to-transparent" />
-                      {timeline.map((item, i) => (
-                        <TimelineItem key={item.id} item={item} index={i} />
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="text-center py-8 text-white/40">No interview history</p>
-                  )}
-                </GlassCard>
-              </div>
-
-              {/* Right Column - Reports & Notifications */}
-              <div className="lg:col-span-1 space-y-6">
-                {/* Recent Reports */}
-                <GlassCard className="p-6">
-                  <div className="flex items-center justify-between mb-4">
-                    <h3 className="text-sm font-semibold uppercase tracking-widest text-white/40">Recent Reports</h3>
-                    {recentReports.length > 0 && (
-                      <span className="text-xs text-white/50">{recentReports.length} report(s)</span>
-                    )}
-                  </div>
-
-                  {recentReports.length > 0 ? (
-                    <div className="space-y-3">
-                      {recentReports.map((report) => (
-                        <ReportCard key={report.id} report={report} />
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="text-center py-8 text-white/40">
-                      <p className="mb-2">No reports generated yet</p>
-                      <p className="text-sm mb-4">Complete interviews to generate analysis reports</p>
-                      <Button variant="ghost" size="sm" onClick={() => handleMarkAllRead()}>
-                        Generate Report
-                      </Button>
-                    </div>
-                  )}
-                </GlassCard>
-
-                {/* Notifications */}
-                <GlassCard className="p-6">
-                  <div className="flex items-center justify-between mb-4">
-                    <h3 className="text-sm font-semibold uppercase tracking-widest text-white/40">Notifications</h3>
-                    <div className="flex items-center gap-2">
-                      {stats.unreadNotifications > 0 && (
-                        <span className="rounded-full bg-red-400/20 px-2 py-0.5 text-xs text-red-400">
-                          {stats.unreadNotifications} unread
-                        </span>
-                      )}
-                      {stats.unreadNotifications > 0 && (
-                        <Button size="sm" variant="ghost" onClick={handleMarkAllRead}>
-                          Mark all read
-                        </Button>
-                      )}
-                    </div>
-                  </div>
-
-                  {latestNotifications.length > 0 ? (
-                    <div className="space-y-3 max-h-96 overflow-y-auto pr-2">
-                      {latestNotifications.map((notification) => (
-                        <NotificationItem
-                          key={notification.id}
-                          notification={notification}
-                          onRead={() => !notification.is_read && handleMarkNotificationRead(notification.id)}
-                          onArchive={() => handleArchiveNotification(notification.id)}
+                      <div className="flex items-center gap-4">
+                        <Ring
+                          value={profilePercent}
+                          size={108}
+                          text={`${profilePercent}%`}
                         />
-                      ))}
+                        <div className="max-w-28 text-xs leading-relaxed text-white/50">
+                          Profile & resume setup
+                        </div>
+                      </div>
                     </div>
-                  ) : (
-                    <p className="text-center py-8 text-white/40">No notifications</p>
-                  )}
-                </GlassCard>
+                  </GlassCard>
+                  <GlassCard className="p-6">
+                    <h2 className="text-sm font-semibold uppercase tracking-widest text-white/50">
+                      At a glance
+                    </h2>
+                    <div className="mt-5 space-y-4">
+                      <MiniProgress
+                        title="Profile readiness"
+                        value={profilePercent}
+                        color="bg-cyan-400"
+                      />
+                      <MiniProgress
+                        title="Interview completion"
+                        value={completedRate}
+                        color="bg-emerald-400"
+                      />
+                      <MiniProgress
+                        title="Average performance"
+                        value={avgScore ?? 0}
+                        color="bg-violet-400"
+                        suffix={avgScore == null ? "No score" : undefined}
+                      />
+                    </div>
+                  </GlassCard>
+                </div>
 
-                {/* Quick Actions */}
-                <GlassCard className="p-6" glow="#A78BFA">
-                  <h3 className="mb-4 text-sm font-semibold uppercase tracking-widest text-white/40">Quick Actions</h3>
-                  <div className="grid grid-cols-2 gap-3">
-                    {quickActions.map((action) => (
-                      <QuickActionButton key={action.key} action={action} />
+                <div className="mt-8 flex flex-wrap items-center justify-between gap-4 border-b border-white/10">
+                  <div
+                    role="tablist"
+                    aria-label="Dashboard sections"
+                    className="flex flex-wrap gap-1"
+                  >
+                    {[
+                      ["overview", "Overview"],
+                      ["activity", "Activity"],
+                      [
+                        "notifications",
+                        `Notifications${number(stats.unreadNotifications) ? ` (${number(stats.unreadNotifications)})` : ""}`,
+                      ],
+                    ].map(([key, title]) => (
+                      <button
+                        key={key}
+                        type="button"
+                        role="tab"
+                        aria-selected={tab === key}
+                        onClick={() => setTab(key)}
+                        className={`relative px-4 py-3 text-sm font-medium transition ${tab === key ? "text-accent" : "text-white/50 hover:text-white"}`}
+                      >
+                        {title}
+                        {tab === key && (
+                          <motion.span
+                            layoutId="dashboard-tab"
+                            className="absolute inset-x-2 bottom-0 h-0.5 bg-accent"
+                          />
+                        )}
+                      </button>
                     ))}
                   </div>
-                </GlassCard>
-              </div>
-            </div>
+                  {tab !== "overview" && (
+                    <input
+                      aria-label="Search dashboard items"
+                      value={search}
+                      onChange={(e) => setSearch(e.target.value)}
+                      placeholder="Search activity or alerts…"
+                      className="mb-2 w-full rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm text-white outline-none placeholder:text-white/35 focus:border-accent/50 sm:w-64"
+                    />
+                  )}
+                </div>
+
+                <AnimatePresence mode="wait">
+                  {tab === "overview" && (
+                    <motion.div
+                      key="overview"
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -6 }}
+                      className="mt-6 grid gap-6 lg:grid-cols-3"
+                    >
+                      <div className="space-y-6 lg:col-span-2">
+                        <GlassCard className="p-6">
+                          <SectionHeader
+                            title="Skill performance"
+                            subtitle="Based on your latest available assessment"
+                          />
+                          {skills.length ? (
+                            <div className="mt-6 grid gap-5 sm:grid-cols-2">
+                              {skills.map(([key, value], i) => (
+                                <SkillRow
+                                  key={key}
+                                  name={label(key)}
+                                  value={value}
+                                  index={i}
+                                />
+                              ))}
+                            </div>
+                          ) : (
+                            <Empty
+                              icon="📊"
+                              title="No skill analysis yet"
+                              detail="Complete an interview to unlock your performance breakdown."
+                              action="Start practicing"
+                              to="/interview"
+                            />
+                          )}
+                        </GlassCard>
+                        <GlassCard className="p-6">
+                          <SectionHeader
+                            title="Latest interview"
+                            subtitle="Your most recent interview session"
+                          />
+                          {latest ? (
+                            <InterviewCard item={latest} />
+                          ) : (
+                            <Empty
+                              icon="🎙️"
+                              title="No interviews yet"
+                              detail="Start your first mock interview to see activity here."
+                              action="Start interview"
+                              to="/interview"
+                            />
+                          )}
+                        </GlassCard>
+                        <GlassCard className="p-6">
+                          <SectionHeader
+                            title="Recent activity"
+                            subtitle="Your interview journey"
+                            action={
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setSearch("");
+                                  setTab("activity");
+                                }}
+                                className="text-xs font-semibold text-accent hover:underline"
+                              >
+                                View all →
+                              </button>
+                            }
+                          />
+                          {timeline.length ? (
+                            <div className="mt-5 space-y-3">
+                              {timeline.slice(0, 4).map((item, index) => (
+                                <ActivityRow
+                                  key={item.id ?? index}
+                                  item={item}
+                                />
+                              ))}
+                            </div>
+                          ) : (
+                            <Empty
+                              icon="🕒"
+                              title="Nothing to show yet"
+                              detail="Your interview activity will appear here."
+                            />
+                          )}
+                        </GlassCard>
+                      </div>
+                      <div className="space-y-6">
+                        <GlassCard className="p-6">
+                          <SectionHeader
+                            title="Your profile"
+                            action={
+                              <Link
+                                to="/profile"
+                                className="text-xs font-semibold text-accent hover:underline"
+                              >
+                                Edit →
+                              </Link>
+                            }
+                          />
+                          <div className="mt-5 flex items-center gap-3">
+                            <div className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-2xl bg-gradient-to-br from-accent to-blue-500 text-lg font-bold text-black">
+                              {user.profile_picture_url ? (
+                                <img
+                                  src={user.profile_picture_url}
+                                  alt="Profile"
+                                  className="h-full w-full object-cover"
+                                />
+                              ) : (
+                                (user.full_name || "U")
+                                  .split(/\s+/)
+                                  .slice(0, 2)
+                                  .map((part) => part[0])
+                                  .join("")
+                                  .toUpperCase()
+                              )}
+                            </div>
+                            <div className="min-w-0">
+                              <p className="truncate font-semibold">
+                                {user.full_name || "Candidate"}
+                              </p>
+                              <p className="truncate text-xs text-white/50">
+                                {user.preferred_role ||
+                                  "Add your preferred role"}
+                              </p>
+                            </div>
+                          </div>
+                          <div className="mt-5 space-y-3">
+                            {[
+                              ["Email", user.email],
+                              ["College", user.college],
+                              ["Branch", user.branch],
+                              ["Graduation", user.graduation_year],
+                            ].map(([key, value]) => (
+                              <div
+                                key={key}
+                                className="flex items-start justify-between gap-3 border-b border-white/5 pb-2 text-xs"
+                              >
+                                <span className="shrink-0 text-white/45">
+                                  {key}
+                                </span>
+                                <span className="break-all text-right text-white/80">
+                                  {value || "Not set"}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                          {list(user.skills).length > 0 && (
+                            <div className="mt-5 flex flex-wrap gap-1.5">
+                              {user.skills.slice(0, 7).map((skill) => (
+                                <span
+                                  key={skill}
+                                  className="rounded-full border border-accent/20 bg-accent/10 px-2.5 py-1 text-[11px] text-accent"
+                                >
+                                  {skill}
+                                </span>
+                              ))}
+                              {user.skills.length > 7 && (
+                                <span className="px-2 py-1 text-xs text-white/50">
+                                  +{user.skills.length - 7}
+                                </span>
+                              )}
+                            </div>
+                          )}
+                        </GlassCard>
+                        <GlassCard className="p-6">
+                          <SectionHeader
+                            title="Current resume"
+                            action={
+                              <Link
+                                to="/resume"
+                                className="text-xs font-semibold text-accent hover:underline"
+                              >
+                                Manage →
+                              </Link>
+                            }
+                          />
+                          {resume ? (
+                            <div className="mt-5">
+                              <div className="flex items-center gap-3">
+                                <span className="text-3xl">📄</span>
+                                <div className="min-w-0">
+                                  <p className="truncate text-sm font-semibold">
+                                    {resume.title ||
+                                      resume.original_filename ||
+                                      "My resume"}
+                                  </p>
+                                  <p className="mt-1 text-xs text-white/45">
+                                    {resume.version
+                                      ? `Version ${resume.version} · `
+                                      : ""}
+                                    {resume.file_size
+                                      ? `${(number(resume.file_size) / 1024).toFixed(1)} KB`
+                                      : "PDF resume"}
+                                  </p>
+                                </div>
+                              </div>
+                              <div className="mt-5 flex gap-2">
+                                <button
+                                  type="button"
+                                  onClick={openResume}
+                                  className="rounded-lg border border-white/15 px-4 py-2 text-xs font-medium hover:bg-white/10"
+                                >
+                                  View resume
+                                </button>
+                                <Link
+                                  to="/resume"
+                                  className="rounded-lg bg-accent/10 px-4 py-2 text-xs font-medium text-accent hover:bg-accent/20"
+                                >
+                                  Replace
+                                </Link>
+                              </div>
+                            </div>
+                          ) : (
+                            <Empty
+                              icon="📄"
+                              title="No resume uploaded"
+                              detail="Upload a resume for personalized questions."
+                              action="Upload resume"
+                              to="/resume"
+                            />
+                          )}
+                        </GlassCard>
+                        <GlassCard className="p-6">
+                          <SectionHeader title="Recent reports" />
+                          {reports.length ? (
+                            <div className="mt-4 space-y-3">
+                              {reports.slice(0, 3).map((report, i) => (
+                                <ReportRow
+                                  key={report.id ?? i}
+                                  report={report}
+                                />
+                              ))}
+                            </div>
+                          ) : (
+                            <Empty
+                              icon="📝"
+                              title="No reports yet"
+                              detail="Reports appear after completed interviews."
+                            />
+                          )}
+                        </GlassCard>
+                        <GlassCard className="p-6">
+                          <SectionHeader title="Quick actions" />
+                          <div className="mt-4 grid grid-cols-2 gap-3">
+                            <QuickAction
+                              to="/interview"
+                              icon="🎤"
+                              title="Mock interview"
+                            />
+                            <QuickAction
+                              to="/resume"
+                              icon="📄"
+                              title="Manage resume"
+                            />
+                            <QuickAction
+                              to="/profile"
+                              icon="👤"
+                              title="Edit profile"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSearch("");
+                                setTab("notifications");
+                              }}
+                              className={`${panel} p-4 text-left transition hover:border-accent/30 hover:bg-white/[0.07]`}
+                            >
+                              <span className="text-2xl">🔔</span>
+                              <span className="mt-2 block text-xs font-medium">
+                                Notifications
+                              </span>
+                            </button>
+                          </div>
+                        </GlassCard>
+                      </div>
+                    </motion.div>
+                  )}
+                  {tab === "activity" && (
+                    <motion.div
+                      key="activity"
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0 }}
+                      className="mt-6 grid gap-6 lg:grid-cols-[1.4fr_1fr]"
+                    >
+                      <GlassCard className="p-6">
+                        <SectionHeader
+                          title="Interview timeline"
+                          subtitle={`${filteredTimeline.length} matching activities`}
+                        />
+                        {filteredTimeline.length ? (
+                          <div className="mt-5 space-y-3">
+                            {filteredTimeline.map((item, i) => (
+                              <ActivityRow key={item.id ?? i} item={item} />
+                            ))}
+                          </div>
+                        ) : (
+                          <Empty
+                            icon="🔎"
+                            title="No matching activity"
+                            detail="Try another search or start an interview."
+                          />
+                        )}
+                      </GlassCard>
+                      <GlassCard className="h-fit p-6">
+                        <SectionHeader
+                          title="Report history"
+                          subtitle="Latest generated feedback"
+                        />
+                        {reports.length ? (
+                          <div className="mt-5 space-y-3">
+                            {reports.map((report, i) => (
+                              <ReportRow key={report.id ?? i} report={report} />
+                            ))}
+                          </div>
+                        ) : (
+                          <Empty
+                            icon="📑"
+                            title="No reports yet"
+                            detail="Finish a mock interview to generate feedback."
+                          />
+                        )}
+                      </GlassCard>
+                    </motion.div>
+                  )}
+                  {tab === "notifications" && (
+                    <motion.div
+                      key="notifications"
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0 }}
+                      className="mt-6"
+                    >
+                      <GlassCard className="p-6">
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          <SectionHeader
+                            title="Notification center"
+                            subtitle="Manage updates and reminders"
+                          />
+                          <button
+                            type="button"
+                            disabled={
+                              !number(stats.unreadNotifications) ||
+                              busyNotifications.includes("all")
+                            }
+                            onClick={markAllRead}
+                            className="rounded-lg border border-accent/25 px-3 py-2 text-xs font-medium text-accent transition hover:bg-accent/10 disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            Mark all as read
+                          </button>
+                        </div>
+                        <div className="mt-5 flex flex-wrap gap-2">
+                          {["all", "unread", "read"].map((key) => (
+                            <button
+                              key={key}
+                              type="button"
+                              onClick={() => setNotificationFilter(key)}
+                              className={`rounded-lg px-4 py-2 text-xs font-medium capitalize transition ${notificationFilter === key ? "bg-accent/15 text-accent" : "bg-white/5 text-white/50 hover:text-white"}`}
+                            >
+                              {key}
+                            </button>
+                          ))}
+                        </div>
+                        {filteredNotifications.length ? (
+                          <div className="mt-5 space-y-3">
+                            {filteredNotifications.map((n) => (
+                              <NotificationRow
+                                key={n.id}
+                                item={n}
+                                disabled={
+                                  busyNotifications.includes(n.id) ||
+                                  busyNotifications.includes("all")
+                                }
+                                onRead={() => markRead(n.id)}
+                                onArchive={() => archive(n.id)}
+                              />
+                            ))}
+                          </div>
+                        ) : (
+                          <Empty
+                            icon="🔔"
+                            title="You're all caught up"
+                            detail="No notifications match your filters."
+                          />
+                        )}
+                      </GlassCard>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+                <p className="mt-8 text-center text-xs text-white/30">
+                  Metrics and reports reflect the data currently available in
+                  your HireReady account.
+                </p>
+              </>
+            ) : null}
           </div>
         </main>
       </PageTransition>
@@ -507,144 +914,364 @@ export default function Dashboard() {
   );
 }
 
-// Helper components
-function StatCard({ label, value, icon, color, highlight }) {
+function LoadingDashboard() {
   return (
-    <GlassCard className="p-5" glow={highlight ? color : null}>
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-widest text-white/40">{label}</p>
-          <p className="mt-1 text-3xl font-bold text-white tabular-nums">{value}</p>
-        </div>
-        <div className={`shrink-0 flex h-12 w-12 items-center justify-center rounded-xl ${highlight ? `bg-[${color}]/20` : "bg-white/5"} text-2xl`}>
-          {icon}
-        </div>
+    <div className="space-y-6 animate-pulse">
+      <div className="h-20 w-2/3 rounded-2xl bg-white/10" />
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+        {Array.from({ length: 4 }, (_, i) => (
+          <div key={i} className="h-32 rounded-2xl bg-white/5" />
+        ))}
       </div>
-    </GlassCard>
-  );
-}
-
-function ProfileRow({ label, value }) {
-  return (
-    <div className="flex items-center justify-between gap-4 py-2 border-b border-white/5 last:border-0">
-      <span className="text-sm text-white/50">{label}</span>
-      <span className="text-sm font-medium text-white text-right max-w-[60%] truncate">{value}</span>
+      <div className="h-48 rounded-2xl bg-white/5" />
+      <div className="grid gap-6 lg:grid-cols-3">
+        {Array.from({ length: 3 }, (_, i) => (
+          <div key={i} className="h-72 rounded-2xl bg-white/5" />
+        ))}
+      </div>
     </div>
   );
 }
-
-function TimelineItem({ item, index }) {
-  const isUpcoming = item.type === "upcoming";
-  const date = item.scheduled_at || item.completed_at || item.created_at;
-
+function Metric({ icon, title, value, detail, accent }) {
+  const accents = {
+    cyan: "from-cyan-400/20 to-cyan-400/0",
+    green: "from-emerald-400/20 to-emerald-400/0",
+    purple: "from-violet-400/20 to-violet-400/0",
+    pink: "from-pink-400/20 to-pink-400/0",
+  };
   return (
-    <div className="relative flex items-start gap-4">
-      <span
-        className={`absolute -left-6 mt-1 h-[15px] w-[15px] rounded-full border-3 flex-shrink-0 ${
-          isUpcoming
-            ? "border-accent bg-transparent shadow-[0_0_10px_rgba(0,242,255,0.6)]"
-            : "border-emerald-400 bg-emerald-400"
-        }`}
-      />
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center justify-between gap-2">
-          <p className="text-sm font-medium text-white truncate">{item.company}</p>
-          <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${STATUS_COLORS[item.status] || "border-white/20 text-white/60"}`}>
-            {STATUS_LABELS[item.status] || item.status}
-          </span>
+    <motion.div whileHover={{ y: -3 }} transition={{ duration: 0.2 }}>
+      <GlassCard className="relative h-full overflow-hidden p-5">
+        <div
+          className={`pointer-events-none absolute inset-0 bg-gradient-to-br ${accents[accent]}`}
+        />
+        <div className="relative">
+          <div className="flex items-center justify-between">
+            <p className="text-xs font-semibold uppercase tracking-wider text-white/50">
+              {title}
+            </p>
+            <span className="text-xl">{icon}</span>
+          </div>
+          <p className="mt-4 text-3xl font-bold tabular-nums">{value}</p>
+          <p className="mt-1 text-xs text-white/45">{detail}</p>
         </div>
-        <p className="text-xs text-white/50">{item.role}</p>
-        <p className="mt-1 text-[11px] text-white/40">{date ? new Date(date).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—"}</p>
-        {item.score !== null && (
-          <p className="mt-1 text-xs font-medium text-accent">Score: {item.score}/100</p>
+      </GlassCard>
+    </motion.div>
+  );
+}
+function SectionHeader({ title, subtitle, action }) {
+  return (
+    <div className="flex flex-wrap items-start justify-between gap-3">
+      <div>
+        <h2 className="text-base font-semibold text-white">{title}</h2>
+        {subtitle && <p className="mt-1 text-xs text-white/45">{subtitle}</p>}
+      </div>
+      {action}
+    </div>
+  );
+}
+function Ring({ value, size = 108, text }) {
+  const radius = 42,
+    circumference = 2 * Math.PI * radius;
+  return (
+    <div className="relative shrink-0" style={{ width: size, height: size }}>
+      <svg
+        viewBox="0 0 100 100"
+        className="h-full w-full -rotate-90"
+        aria-hidden="true"
+      >
+        <circle
+          cx="50"
+          cy="50"
+          r={radius}
+          stroke="rgba(255,255,255,.09)"
+          strokeWidth="7"
+          fill="none"
+        />
+        <motion.circle
+          cx="50"
+          cy="50"
+          r={radius}
+          stroke="#00F2FF"
+          strokeLinecap="round"
+          strokeWidth="7"
+          fill="none"
+          strokeDasharray={circumference}
+          initial={{ strokeDashoffset: circumference }}
+          animate={{
+            strokeDashoffset: circumference * (1 - clamp(value) / 100),
+          }}
+          transition={{ duration: 1.1 }}
+        />
+      </svg>
+      <div className="absolute inset-0 flex items-center justify-center text-xl font-bold">
+        {text}
+      </div>
+    </div>
+  );
+}
+function MiniProgress({ title, value, color, suffix }) {
+  return (
+    <div>
+      <div className="mb-2 flex justify-between gap-3 text-xs">
+        <span className="text-white/60">{title}</span>
+        <span className="font-semibold text-white">
+          {suffix || `${Math.round(clamp(value))}%`}
+        </span>
+      </div>
+      <div className="h-2 overflow-hidden rounded-full bg-white/10">
+        <motion.div
+          initial={{ width: 0 }}
+          animate={{ width: `${clamp(value)}%` }}
+          transition={{ duration: 0.8 }}
+          className={`h-full rounded-full ${color}`}
+        />
+      </div>
+    </div>
+  );
+}
+function SkillRow({ name, value, index }) {
+  const colors = [
+    "bg-cyan-400",
+    "bg-blue-400",
+    "bg-violet-400",
+    "bg-pink-400",
+    "bg-emerald-400",
+    "bg-amber-400",
+  ];
+  return (
+    <MiniProgress
+      title={name}
+      value={value}
+      color={colors[index % colors.length]}
+    />
+  );
+}
+function Empty({ icon, title, detail, action, to }) {
+  return (
+    <div className="flex flex-col items-center px-3 py-10 text-center">
+      <span className="text-3xl">{icon}</span>
+      <p className="mt-3 text-sm font-medium text-white/80">{title}</p>
+      <p className="mt-1 max-w-xs text-xs leading-relaxed text-white/45">
+        {detail}
+      </p>
+      {action && to && (
+        <Link
+          to={to}
+          className="mt-4 rounded-lg border border-accent/30 px-4 py-2 text-xs font-semibold text-accent hover:bg-accent/10"
+        >
+          {action} →
+        </Link>
+      )}
+    </div>
+  );
+}
+function Badge({ status }) {
+  return (
+    <span
+      className={`shrink-0 rounded-full border px-2.5 py-1 text-[11px] font-medium ${statusStyles[status] || "border-white/15 bg-white/5 text-white/60"}`}
+    >
+      {statusNames[status] || label(status)}
+    </span>
+  );
+}
+function InterviewCard({ item }) {
+  return (
+    <div className="mt-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="text-lg font-semibold">
+            {item.company || "Mock interview"}
+          </p>
+          <p className="mt-1 text-sm text-white/50">
+            {item.role || "Interview practice"}
+          </p>
+        </div>
+        <Badge status={item.status} />
+      </div>
+      <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
+        {[
+          ["Stage", stageNames[item.stage] || label(item.stage)],
+          [
+            "Date",
+            dateFmt(item.scheduled_at || item.completed_at || item.created_at),
+          ],
+          [
+            "Score",
+            item.score == null ? "—" : `${displayScore(item.score)}/100`,
+          ],
+          [
+            "Duration",
+            item.duration_minutes ? `${item.duration_minutes} min` : "—",
+          ],
+        ].map(([key, value]) => (
+          <div key={key} className={`${panel} p-3`}>
+            <p className="text-[11px] text-white/40">{key}</p>
+            <p className="mt-1 break-words text-sm font-semibold">{value}</p>
+          </div>
+        ))}
+      </div>
+      {item.feedback && (
+        <p className="mt-4 rounded-xl bg-white/5 p-4 text-sm leading-relaxed text-white/60">
+          {item.feedback}
+        </p>
+      )}
+      <div className="mt-5 flex flex-wrap gap-2">
+        {item.status === "in_progress" && (
+          <Link
+            to="/interview"
+            className="rounded-lg bg-accent/15 px-4 py-2 text-xs font-semibold text-accent hover:bg-accent/25"
+          >
+            Continue interview →
+          </Link>
+        )}
+        {item.meeting_link && (
+          <a
+            href={item.meeting_link}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="rounded-lg border border-white/15 px-4 py-2 text-xs font-semibold hover:bg-white/10"
+          >
+            Open meeting ↗
+          </a>
+        )}
+        <Link
+          to="/interview"
+          className="rounded-lg border border-white/15 px-4 py-2 text-xs font-semibold hover:bg-white/10"
+        >
+          New practice session →
+        </Link>
+      </div>
+    </div>
+  );
+}
+function ActivityRow({ item }) {
+  const date = item.scheduled_at || item.completed_at || item.created_at;
+  return (
+    <div className={`${panel} flex items-start gap-3 p-4`}>
+      <span
+        className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${item.status === "completed" ? "bg-emerald-400" : "bg-cyan-400"}`}
+      />
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <p className="text-sm font-semibold">
+            {item.company || "Mock interview"}
+          </p>
+          <Badge status={item.status} />
+        </div>
+        <p className="mt-1 text-xs text-white/50">
+          {item.role || stageNames[item.stage] || "Interview"}
+        </p>
+        <div className="mt-2 flex flex-wrap items-center gap-3 text-[11px] text-white/40">
+          <span>
+            {dateFmt(date, {
+              month: "short",
+              day: "numeric",
+              year: "numeric",
+              hour: "2-digit",
+              minute: "2-digit",
+            })}
+          </span>
+          {item.score != null && (
+            <span className="font-semibold text-accent">
+              Score {displayScore(item.score)}/100
+            </span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+function ReportRow({ report }) {
+  const values =
+    report.scores && typeof report.scores === "object"
+      ? Object.values(report.scores).map(Number).filter(Number.isFinite)
+      : [];
+  const average = values.length
+    ? Math.round(values.reduce((sum, score) => sum + score, 0) / values.length)
+    : null;
+  return (
+    <div className={`${panel} p-4`}>
+      <div className="flex items-start justify-between gap-2">
+        <p className="min-w-0 text-sm font-semibold">
+          {report.title || label(report.type) || "Interview report"}
+        </p>
+        {average != null && (
+          <span className="shrink-0 text-xs font-semibold text-emerald-300">
+            {average}/100
+          </span>
         )}
       </div>
+      <p className="mt-1 text-[11px] text-accent">{label(report.type)}</p>
+      {report.summary && (
+        <p className="mt-2 line-clamp-3 text-xs leading-relaxed text-white/50">
+          {report.summary}
+        </p>
+      )}
+      <p className="mt-2 text-[11px] text-white/35">
+        {dateFmt(report.created_at)}
+      </p>
     </div>
   );
 }
-
-function ReportCard({ report }) {
-  const typeLabels = {
-    interview_analysis: "Interview Analysis",
-    skill_assessment: "Skill Assessment",
-    progress_report: "Progress Report",
-    mock_feedback: "Mock Feedback",
-  };
-
+function NotificationRow({ item, onRead, onArchive, disabled }) {
   return (
-    <div className="p-4 rounded-xl bg-white/5 border border-white/10 hover:border-accent/30 transition-colors group">
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-xs font-medium uppercase tracking-wider text-accent">
-              {typeLabels[report.type] || report.type}
-            </span>
-            {report.scores && (
-              <span className="text-xs text-emerald-400 font-mono">
-                Avg: {Math.round(Object.values(report.scores).reduce((a, b) => a + b, 0) / Object.values(report.scores).length)}
+    <div
+      className={`rounded-xl border p-4 ${item.is_read ? "border-white/10 bg-white/[0.025]" : "border-accent/25 bg-accent/[0.055]"}`}
+    >
+      <div className="flex items-start gap-3">
+        <span className="text-xl">{notificationIcons[item.type] || "🔔"}</span>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="text-sm font-semibold">
+              {item.title || "Notification"}
+            </p>
+            {!item.is_read && (
+              <span className="rounded-full bg-accent/20 px-2 py-0.5 text-[10px] text-accent">
+                New
+              </span>
+            )}
+            {item.priority === "urgent" && (
+              <span className="text-[10px] font-semibold uppercase text-red-300">
+                Urgent
               </span>
             )}
           </div>
-          <h4 className="mt-1 text-sm font-medium text-white truncate group-hover:text-accent transition-colors">
-            {report.title}
-          </h4>
-          {report.summary && (
-            <p className="mt-1 text-xs text-white/50 line-clamp-2">{report.summary}</p>
+          {item.message && (
+            <p className="mt-1 text-xs leading-relaxed text-white/60">
+              {item.message}
+            </p>
           )}
-        </div>
-        <span className="shrink-0 text-xs text-white/40">
-          {new Date(report.created_at).toLocaleDateString()}
-        </span>
-      </div>
-    </div>
-  );
-}
-
-function NotificationItem({ notification, onRead, onArchive }) {
-  const icon = TYPE_ICONS[notification.type] || "🔔";
-
-  return (
-    <div
-      className={`p-3 rounded-xl border transition-colors ${
-        notification.is_read
-          ? "bg-white/5 border-white/10"
-          : "bg-accent/10 border-accent/30"
-      } group`}
-    >
-      <div className="flex items-start gap-3">
-        <span className="shrink-0 mt-0.5 text-lg">{icon}</span>
-        <div className="flex-1 min-w-0">
-          <div className="flex items-start justify-between gap-2">
-            <h4 className={`text-sm font-medium ${notification.is_read ? "text-white/80" : "text-white"}`}>
-              {notification.title}
-            </h4>
-            <span className={`shrink-0 text-[10px] font-medium ${PRIORITY_COLORS[notification.priority]}`}>
-              {notification.priority}
-            </span>
-          </div>
-          {notification.message && (
-            <p className="mt-1 text-xs text-white/60 line-clamp-1">{notification.message}</p>
-          )}
-          <p className="mt-1 text-[10px] text-white/40">
-            {new Date(notification.created_at).toLocaleString()}
+          <p className="mt-2 text-[11px] text-white/35">
+            {dateFmt(item.created_at, {
+              month: "short",
+              day: "numeric",
+              year: "numeric",
+              hour: "2-digit",
+              minute: "2-digit",
+            })}
           </p>
         </div>
-        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-          {!notification.is_read && (
+        <div className="flex shrink-0 gap-1">
+          {!item.is_read && (
             <button
+              type="button"
+              disabled={disabled}
               onClick={onRead}
-              className="p-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-white/60 hover:text-white transition-colors"
               aria-label="Mark as read"
               title="Mark as read"
+              className="rounded-lg border border-white/10 px-2 py-1 text-sm text-emerald-300 hover:bg-white/10 disabled:opacity-40"
             >
               ✓
             </button>
           )}
           <button
+            type="button"
+            disabled={disabled}
             onClick={onArchive}
-            className="p-1.5 rounded-lg bg-white/5 hover:bg-red-400/20 text-white/60 hover:text-red-400 transition-colors"
-            aria-label="Archive"
+            aria-label="Archive notification"
             title="Archive"
+            className="rounded-lg border border-white/10 px-2 py-1 text-sm text-white/60 hover:bg-red-400/10 hover:text-red-300 disabled:opacity-40"
           >
             ✕
           </button>
@@ -653,51 +1280,14 @@ function NotificationItem({ notification, onRead, onArchive }) {
     </div>
   );
 }
-
-function QuickActionButton({ action }) {
-  const icons = {
-    upload: "📤",
-    calendar: "📅",
-    "file-text": "📊",
-    user: "👤",
-    bell: "🔔",
-  };
-
-  const priorityColors = {
-    high: "border-red-400/30 hover:border-red-400",
-    medium: "border-amber-400/30 hover:border-amber-400",
-    low: "border-white/10 hover:border-accent/30",
-  };
-
-  const routes = {
-    upload_resume: "/profile#resume",
-    schedule_mock: "/interviews/new",
-    generate_report: "/reports/new",
-    update_profile: "/profile",
-    settings: "/settings",
-  };
-
+function QuickAction({ to, icon, title }) {
   return (
     <Link
-      to={routes[action.key] || "#"}
-      className={`group p-4 rounded-xl border ${priorityColors[action.priority]} bg-white/5 hover:bg-white/10 transition-all text-center`}
+      to={to}
+      className={`${panel} p-4 transition hover:border-accent/30 hover:bg-white/[0.07]`}
     >
-      <span className="block text-2xl mb-2">{icons[action.icon] || "⚡"}</span>
-      <span className="text-sm font-medium text-white group-hover:text-accent transition-colors">
-        {action.label}
-      </span>
+      <span className="text-2xl">{icon}</span>
+      <span className="mt-2 block text-xs font-medium">{title}</span>
     </Link>
   );
-}
-
-function getSkillColor(skill) {
-  const colors = {
-    communication: "#00F2FF",
-    technical: "#60A5FA",
-    behavioral: "#A78BFA",
-    confidence: "#F472B6",
-    coding: "#34D399",
-    behavior: "#A78BFA",
-  };
-  return colors[skill] || "#60A5FA";
 }
