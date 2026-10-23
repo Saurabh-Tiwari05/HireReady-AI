@@ -493,6 +493,7 @@ export default function InterviewPage() {
     console.log("Role:", role);
   }, [sessionId, company, role]);
   const timerRef = useRef(null);
+  const nextQuestionRequestRef = useRef(false);
   const interviewEndedRef = useRef(false);
   const conversationEndRef = useRef(null);
   const interviewStarted = useRef(false);
@@ -635,7 +636,15 @@ export default function InterviewPage() {
    * Fetch the next question from the AI interviewer
    */
   const fetchNextQuestion = useCallback(async () => {
-    if (!interview?.contextId) return;
+    if (
+      !interview?.contextId ||
+      nextQuestionRequestRef.current ||
+      interviewEndedRef.current
+    ) {
+      return;
+    }
+
+    nextQuestionRequestRef.current = true;
 
     try {
       setError(null);
@@ -661,33 +670,84 @@ export default function InterviewPage() {
       const data = await res.json();
       const question = data.data;
 
+      if (interviewEndedRef.current) return;
+
       setCurrentQuestion(question);
       setMessageId(question.messageId || null);
-
       setQuestionNumber((prev) => prev + 1);
+
+      setIsEvaluating(false);
+      setHasAnswerStarted(false);
+      setEvaluationReady(false);
+      setNextQuestionCountdown(null);
 
       setStatus("question");
     } catch (err) {
       console.error("Failed to get next question:", err);
 
-      setError(err.message || "Failed to get next question");
-
-      // Keep interview UI visible instead of switching
-      // to the initial interview loading/error screen.
-      setStatus("question");
+      if (!interviewEndedRef.current) {
+        setError(err.message || "Failed to get next question");
+        setStatus("question");
+        setEvaluationReady(true); // Allows manual retry after failure.
+      }
     } finally {
+      nextQuestionRequestRef.current = false;
       setIsNextQuestionLoading(false);
     }
   }, [interview?.contextId]);
 
   const handleNextQuestion = useCallback(async () => {
-    if (isNextQuestionLoading) return;
+    if (nextQuestionRequestRef.current || interviewEndedRef.current) {
+      return;
+    }
 
+    setNextQuestionCountdown(null);
     setEvaluationReady(false);
 
     await fetchNextQuestion();
-  }, [fetchNextQuestion, isNextQuestionLoading]);
+  }, [fetchNextQuestion]);
 
+  useEffect(() => {
+    if (
+      !evaluationReady ||
+      status !== "question" ||
+      isNextQuestionLoading ||
+      interviewEndedRef.current
+    ) {
+      setNextQuestionCountdown(null);
+      return;
+    }
+
+    setNextQuestionCountdown(10);
+
+    const interval = setInterval(() => {
+      setNextQuestionCountdown((prev) => {
+        if (prev === null) return null;
+
+        return Math.max(0, prev - 1);
+      });
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [evaluationReady, status, isNextQuestionLoading]);
+
+  useEffect(() => {
+    if (
+      nextQuestionCountdown === 0 &&
+      evaluationReady &&
+      status === "question" &&
+      !isNextQuestionLoading &&
+      !interviewEndedRef.current
+    ) {
+      handleNextQuestion();
+    }
+  }, [
+    nextQuestionCountdown,
+    evaluationReady,
+    status,
+    isNextQuestionLoading,
+    handleNextQuestion,
+  ]);
   /**
    * End the interview and generate the final report
    */
@@ -744,39 +804,83 @@ export default function InterviewPage() {
 
   /**
    * Countdown timer
+   *
+   * Runs only while the candidate is answering.
+   * Pauses during AI evaluation and question generation.
    */
   useEffect(() => {
-    if (status !== "question" && status !== "listening") return;
+    const shouldRun =
+      (status === "question" || status === "listening") &&
+      !!currentQuestion &&
+      !evaluationReady &&
+      !isEvaluating &&
+      !isNextQuestionLoading &&
+      !interviewEndedRef.current;
+
+    if (!shouldRun) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+      return;
+    }
 
     timerRef.current = setInterval(() => {
-      setRemainingTime((prev) => {
-        console.log("[INTERVIEW TIMER]", prev);
-        if (prev <= 1) {
-          clearInterval(timerRef.current);
-          handleEndInterview();
-          return 0;
-        }
-        return prev - 1;
-      });
+      setRemainingTime((prev) => Math.max(0, prev - 1));
     }, 1000);
 
-    return () => clearInterval(timerRef.current);
-  }, [status, handleEndInterview]);
+    return () => {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    };
+  }, [
+    status,
+    currentQuestion,
+    evaluationReady,
+    isEvaluating,
+    isNextQuestionLoading,
+  ]);
+
+  useEffect(() => {
+    if (remainingTime === 0 && currentQuestion && !interviewEndedRef.current) {
+      handleEndInterview();
+    }
+  }, [remainingTime, currentQuestion, handleEndInterview]);
 
   /**
    * Handle transcript from SpeechRecorder
    */
   const handleStatusChange = (data) => {
+    // -----------------------------------------
+    // AI evaluation has started
+    // Pause interview timer
+    // -----------------------------------------
+    if (data.type === "evaluation_start") {
+      console.log("[INTERVIEW] AI evaluation started");
+
+      setIsEvaluating(true);
+      return;
+    }
+
+    // -----------------------------------------
+    // AI evaluation has ended due to an error
+    // Resume interview timer
+    // -----------------------------------------
+    if (data.type === "evaluation_end") {
+      console.log("[INTERVIEW] AI evaluation ended");
+
+      setIsEvaluating(false);
+      return;
+    }
+
+    // -----------------------------------------
+    // Live speech transcript
+    // -----------------------------------------
     if (data.type === "transcript") {
       setConversation((prev) => {
         const updated = [...prev];
 
-        // Find the most recent user answer.
         const lastIndex = updated.length - 1;
 
         if (lastIndex >= 0 && updated[lastIndex].role === "user") {
-          // Update the existing answer instead of creating
-          // another chat message.
           updated[lastIndex] = {
             ...updated[lastIndex],
             content: data.transcript,
@@ -785,7 +889,6 @@ export default function InterviewPage() {
           return updated;
         }
 
-        // First transcript update for this answer.
         updated.push({
           role: "user",
           content: data.transcript,
@@ -793,11 +896,20 @@ export default function InterviewPage() {
 
         return updated;
       });
+
+      return;
     }
 
+    // -----------------------------------------
+    // AI evaluation completed successfully
+    // -----------------------------------------
     if (data.type === "evaluation") {
       console.log("[INTERVIEW] Evaluation received:", data.evaluation);
 
+      // Stop evaluation processing state
+      setIsEvaluating(false);
+
+      // Add evaluation to conversation
       setConversation((prev) => [
         ...prev,
         {
@@ -806,8 +918,10 @@ export default function InterviewPage() {
         },
       ]);
 
-      // Wait for the candidate to click "Next Question"
+      // Start the 10-second next-question countdown
       setEvaluationReady(true);
+
+      return;
     }
   };
 
@@ -1337,19 +1451,25 @@ export default function InterviewPage() {
                             )}
 
                             {/* ================= NEXT QUESTION ================= */}
-                            {evaluationReady && (
-                              <div className="mt-6 pt-5 border-t border-white/10 flex justify-end">
-                                <button
-                                  onClick={handleNextQuestion}
-                                  disabled={isNextQuestionLoading}
-                                  className="px-6 py-2.5 rounded-lg bg-accent text-black font-semibold hover:opacity-90 transition disabled:cursor-not-allowed disabled:opacity-50"
-                                >
-                                  {isNextQuestionLoading
-                                    ? "Generating..."
-                                    : "Next Question →"}
-                                </button>
-                              </div>
-                            )}
+                            {evaluationReady &&
+                              i === conversation.length - 1 && (
+                                <div className="mt-6 pt-5 border-t border-white/10 flex flex-wrap items-center justify-between gap-4">
+                                  <span className="text-sm text-white/60">
+                                    Next question in{" "}
+                                    <strong className="text-accent">
+                                      {nextQuestionCountdown ?? 10}s
+                                    </strong>
+                                  </span>
+
+                                  <button
+                                    onClick={handleNextQuestion}
+                                    disabled={isNextQuestionLoading}
+                                    className="px-6 py-2.5 rounded-lg bg-accent text-black font-semibold hover:opacity-90 transition disabled:cursor-not-allowed disabled:opacity-50"
+                                  >
+                                    Next Question Now →
+                                  </button>
+                                </div>
+                              )}
                           </motion.div>
                         );
                       }

@@ -154,7 +154,7 @@ const SpeechRecorder = ({
 
       if (status.type === "speechstart") {
         console.log(
-          "[SPEECH] Actual speech detected. Resetting silence clock."
+          "[SPEECH] Actual speech detected. Resetting silence clock.",
         );
 
         lastSpeechAtRef.current = Date.now();
@@ -177,10 +177,7 @@ const SpeechRecorder = ({
     // --------------------------------------------------
 
     onFinalTranscript: (finalTranscript) => {
-      console.log(
-        "[SPEECH] Final speech segment received:",
-        finalTranscript
-      );
+      console.log("[SPEECH] Final speech segment received:", finalTranscript);
 
       /*
        * A final result is definite evidence that the
@@ -233,10 +230,7 @@ const SpeechRecorder = ({
   // Submit completed answer
   // --------------------------------------------------
 
-  const submitAnswer = async (
-    finalTranscript,
-    { alternatives = [] } = {}
-  ) => {
+  const submitAnswer = async (finalTranscript, { alternatives = [] } = {}) => {
     if (!finalTranscript?.trim()) {
       console.warn("[SPEECH] Cannot submit empty answer.");
 
@@ -263,7 +257,9 @@ const SpeechRecorder = ({
 
     submittedRef.current = true;
     setIsProcessing(true);
-
+    onStatusChange?.({
+      type: "evaluation_start",
+    });
     // Stop silence monitoring.
     clearInterval(silenceTimerRef.current);
     clearInterval(silenceMonitorRef.current);
@@ -278,57 +274,42 @@ const SpeechRecorder = ({
       questionId,
     });
 
-    console.log(
-      "[SPEECH] Final authoritative transcript:",
-      finalTranscript
-    );
+    console.log("[SPEECH] Final authoritative transcript:", finalTranscript);
 
-    console.log(
-      "[SPEECH] Recognition alternatives:",
-      alternatives
-    );
+    console.log("[SPEECH] Recognition alternatives:", alternatives);
 
     try {
       const endTime = Date.now();
 
       const responseDuration = Math.max(0, elapsedTime);
 
-      const calculatedStartTime =
-        endTime - responseDuration;
+      const calculatedStartTime = endTime - responseDuration;
 
-      const result =
-        await SpeechService.submitTranscript({
-          interviewId,
-          contextId,
-          questionId,
+      const result = await SpeechService.submitTranscript({
+        interviewId,
+        contextId,
+        questionId,
 
-          // Keep the raw browser transcript.
-          transcript: finalTranscript.trim(),
+        // Keep the raw browser transcript.
+        transcript: finalTranscript.trim(),
 
-          // Browser recognition alternatives.
-          alternatives,
+        // Browser recognition alternatives.
+        alternatives,
 
-          startTime: calculatedStartTime,
-          endTime,
+        startTime: calculatedStartTime,
+        endTime,
 
-          responseDuration,
+        responseDuration,
 
-          wordCount: finalTranscript
-            .trim()
-            .split(/\s+/)
-            .filter(Boolean).length,
+        wordCount: finalTranscript.trim().split(/\s+/).filter(Boolean).length,
 
-          topic: "general",
-          difficulty: "medium",
-        });
+        topic: "general",
+        difficulty: "medium",
+      });
 
-      console.log(
-        "[SPEECH] Answer submitted successfully:",
-        result
-      );
+      console.log("[SPEECH] Answer submitted successfully:", result);
 
-      const evaluation =
-        result?.data?.evaluation || null;
+      const evaluation = result?.data?.evaluation || null;
 
       if (onStatusChange) {
         onStatusChange({
@@ -338,20 +319,22 @@ const SpeechRecorder = ({
         });
       }
     } catch (err) {
-      console.error(
-        "[SPEECH] Error submitting answer:",
-        err
-      );
+      console.error("[SPEECH] Error submitting answer:", err);
 
       // Allow retry if API failed.
       submittedRef.current = false;
 
-      if (onStatusChange) {
-        onStatusChange({
-          type: "error",
-          error: err,
-        });
-      }
+      // Tell Interview.jsx that evaluation has stopped.
+      // This allows the interview timer to resume.
+      onStatusChange?.({
+        type: "evaluation_end",
+      });
+
+      // Forward the original error to Interview.jsx.
+      onStatusChange?.({
+        type: "error",
+        error: err,
+      });
     } finally {
       setIsProcessing(false);
     }
@@ -387,7 +370,7 @@ const SpeechRecorder = ({
      */
 
     console.log(
-      "[SPEECH] Stopping recognition and waiting for final browser result..."
+      "[SPEECH] Stopping recognition and waiting for final browser result...",
     );
 
     stop();
@@ -411,12 +394,12 @@ const SpeechRecorder = ({
 
     console.log(
       "[SPEECH] Final answer after recognition settled:",
-      finalAnswer
+      finalAnswer,
     );
 
     console.log(
       "[SPEECH] Final alternatives after recognition settled:",
-      alternatives
+      alternatives,
     );
 
     lastSpeechAtRef.current = null;
@@ -431,17 +414,11 @@ const SpeechRecorder = ({
   // --------------------------------------------------
 
   const handleSilenceTimeout = async () => {
-    if (
-      isProcessing ||
-      submittedRef.current ||
-      !isRecording
-    ) {
+    if (isProcessing || submittedRef.current || !isRecording) {
       return;
     }
 
-    console.log(
-      "[SPEECH] 7 seconds of actual silence reached."
-    );
+    console.log("[SPEECH] 7 seconds of actual silence reached.");
 
     clearInterval(silenceTimerRef.current);
     clearInterval(silenceMonitorRef.current);
@@ -453,9 +430,7 @@ const SpeechRecorder = ({
      *
      * A final browser result may still arrive after this.
      */
-    console.log(
-      "[SPEECH] Stopping recognition before automatic submission..."
-    );
+    console.log("[SPEECH] Stopping recognition before automatic submission...");
 
     stop();
 
@@ -481,24 +456,16 @@ const SpeechRecorder = ({
      * Never submit an empty answer.
      */
     if (!finalAnswer?.trim()) {
-      console.warn(
-        "[SPEECH] Silence reached but no answer exists."
-      );
+      console.warn("[SPEECH] Silence reached but no answer exists.");
 
       lastSpeechAtRef.current = null;
 
       return;
     }
 
-    console.log(
-      "[SPEECH] Auto-submit final answer:",
-      finalAnswer
-    );
+    console.log("[SPEECH] Auto-submit final answer:", finalAnswer);
 
-    console.log(
-      "[SPEECH] Auto-submit alternatives:",
-      alternatives
-    );
+    console.log("[SPEECH] Auto-submit alternatives:", alternatives);
 
     lastSpeechAtRef.current = null;
 
@@ -517,9 +484,7 @@ const SpeechRecorder = ({
     }
 
     if (!questionId) {
-      console.warn(
-        "[SPEECH] Cannot start: question ID missing."
-      );
+      console.warn("[SPEECH] Cannot start: question ID missing.");
 
       return;
     }
@@ -578,11 +543,7 @@ const SpeechRecorder = ({
   //
 
   useEffect(() => {
-    if (
-      !isRecording ||
-      isPaused ||
-      isProcessing
-    ) {
+    if (!isRecording || isPaused || isProcessing) {
       clearInterval(silenceMonitorRef.current);
       clearInterval(silenceTimerRef.current);
 
@@ -599,31 +560,22 @@ const SpeechRecorder = ({
     clearInterval(silenceMonitorRef.current);
 
     silenceMonitorRef.current = setInterval(() => {
-      if (
-        !isRecording ||
-        isPaused ||
-        isProcessing ||
-        submittedRef.current
-      ) {
+      if (!isRecording || isPaused || isProcessing || submittedRef.current) {
         return;
       }
 
       const now = Date.now();
 
-      const silenceDuration =
-        now - lastSpeechAtRef.current;
+      const silenceDuration = now - lastSpeechAtRef.current;
 
-      const remainingMs =
-        SILENCE_LIMIT_MS - silenceDuration;
+      const remainingMs = SILENCE_LIMIT_MS - silenceDuration;
 
       // ------------------------------------------------
       // Candidate is still inside normal silence window
       // ------------------------------------------------
 
       if (remainingMs > 0) {
-        const remainingSeconds = Math.ceil(
-          remainingMs / 1000
-        );
+        const remainingSeconds = Math.ceil(remainingMs / 1000);
 
         /*
          * Only show the warning during the final
@@ -644,9 +596,7 @@ const SpeechRecorder = ({
 
       clearInterval(silenceMonitorRef.current);
 
-      console.log(
-        "[SPEECH] 7 seconds of actual silence reached."
-      );
+      console.log("[SPEECH] 7 seconds of actual silence reached.");
 
       setSilenceSeconds(0);
 
@@ -656,11 +606,7 @@ const SpeechRecorder = ({
     return () => {
       clearInterval(silenceMonitorRef.current);
     };
-  }, [
-    isRecording,
-    isPaused,
-    isProcessing,
-  ]);
+  }, [isRecording, isPaused, isProcessing]);
 
   // --------------------------------------------------
   // Cancel visible countdown when candidate speaks
@@ -702,8 +648,7 @@ const SpeechRecorder = ({
 
     clearTimeout(autoSaveRef.current);
 
-    const saveStartTime =
-      Date.now() - elapsedTime;
+    const saveStartTime = Date.now() - elapsedTime;
 
     autoSaveRef.current = setTimeout(() => {
       SpeechService.autoSaveTranscript({
@@ -714,10 +659,7 @@ const SpeechRecorder = ({
         isFinal: false,
         startTime: saveStartTime,
       }).catch((saveErr) =>
-        console.error(
-          "[SPEECH] Auto-save error:",
-          saveErr
-        )
+        console.error("[SPEECH] Auto-save error:", saveErr),
       );
     }, 3000);
 
@@ -740,11 +682,7 @@ const SpeechRecorder = ({
   // --------------------------------------------------
 
   useEffect(() => {
-    if (
-      !isQuestionActive &&
-      isRecording &&
-      !isProcessing
-    ) {
+    if (!isQuestionActive && isRecording && !isProcessing) {
       stopTimeoutRef.current = setTimeout(() => {
         clearInterval(silenceMonitorRef.current);
         clearInterval(silenceTimerRef.current);
@@ -762,12 +700,7 @@ const SpeechRecorder = ({
         clearTimeout(stopTimeoutRef.current);
       }
     };
-  }, [
-    isQuestionActive,
-    isRecording,
-    isProcessing,
-    stop,
-  ]);
+  }, [isQuestionActive, isRecording, isProcessing, stop]);
 
   // --------------------------------------------------
   // Cleanup
@@ -842,21 +775,18 @@ const SpeechRecorder = ({
       />
 
       {/* Silence warning */}
-      {silenceSeconds !== null &&
-        isRecording &&
-        !isPaused &&
-        !isProcessing && (
-          <div className="text-center">
-            <div className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-yellow-900/70 border border-yellow-600 text-yellow-200 text-sm">
-              <span>⚠️</span>
+      {silenceSeconds !== null && isRecording && !isPaused && !isProcessing && (
+        <div className="text-center">
+          <div className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-yellow-900/70 border border-yellow-600 text-yellow-200 text-sm">
+            <span>⚠️</span>
 
-              <span>
-                No speech detected. Auto-submit in{" "}
-                <strong>{silenceSeconds}s</strong>
-              </span>
-            </div>
+            <span>
+              No speech detected. Auto-submit in{" "}
+              <strong>{silenceSeconds}s</strong>
+            </span>
           </div>
-        )}
+        </div>
+      )}
 
       {/* Controls */}
       <div className="flex items-center justify-between bg-gray-800 rounded-lg px-4 py-3">
@@ -873,19 +803,13 @@ const SpeechRecorder = ({
                   : "bg-green-700 hover:bg-green-800"
             }`}
           >
-            {isProcessing
-              ? "Evaluating..."
-              : isRecording
-                ? "Stop"
-                : "Start"}
+            {isProcessing ? "Evaluating..." : isRecording ? "Stop" : "Start"}
           </button>
 
           {/* Pause / Resume */}
           {isRecording && !isProcessing && (
             <button
-              onClick={() =>
-                isPaused ? resume() : pause()
-              }
+              onClick={() => (isPaused ? resume() : pause())}
               className="px-4 py-2 bg-yellow-700 text-sm font-medium rounded hover:bg-yellow-800"
             >
               {isPaused ? "Resume" : "Pause"}
@@ -893,23 +817,20 @@ const SpeechRecorder = ({
           )}
 
           {/* Reset */}
-          {!isRecording &&
-            !isProcessing && (
-              <button
-                onClick={handleReset}
-                disabled={!transcript}
-                className="px-4 py-2 bg-gray-600 text-sm font-medium rounded hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                Reset
-              </button>
-            )}
+          {!isRecording && !isProcessing && (
+            <button
+              onClick={handleReset}
+              disabled={!transcript}
+              className="px-4 py-2 bg-gray-600 text-sm font-medium rounded hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Reset
+            </button>
+          )}
         </div>
 
         {/* Processing indicator */}
         {isProcessing && (
-          <div className="text-sm text-yellow-300">
-            ⏳ Evaluating answer...
-          </div>
+          <div className="text-sm text-yellow-300">⏳ Evaluating answer...</div>
         )}
       </div>
 
@@ -919,19 +840,13 @@ const SpeechRecorder = ({
           <span className="text-red-300 font-medium bg-red-900 px-2 py-1 rounded">
             {typeof error === "string"
               ? error
-              : error?.message ||
-                "Speech recognition error"}
+              : error?.message || "Speech recognition error"}
           </span>
         )}
 
-        <span>
-          Duration:{" "}
-          {Math.floor(elapsedTime / 1000)}s
-        </span>
+        <span>Duration: {Math.floor(elapsedTime / 1000)}s</span>
 
-        <span>
-          Words: {wordCount}
-        </span>
+        <span>Words: {wordCount}</span>
       </div>
     </div>
   );
